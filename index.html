@@ -11377,6 +11377,7 @@ function loadFullTVChart(symbol) {
     }
 
 
+    let newsLang = localStorage.getItem('newsLang') || 'cn';
     function switchNewsLang(lang) {
       newsLang = lang;
       localStorage.setItem('newsLang', lang);
