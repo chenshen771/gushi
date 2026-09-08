@@ -13797,6 +13797,13 @@ const FALLBACK_SECTORS = {
               if (myTok === window.__sectorRefreshTok.us) {
                 var emN2 = 0;
                 try { emN2 = Object.keys(window.__emUSMap || {}).length; } catch (eN2) {}
+                // 强制把本趟全量结果写入 D1，避免关网页重开又变旧角标
+                try {
+                  if (emN2 > 100 && typeof persistSectorCloudFull === 'function') {
+                    showSectorProgress('us', 98, 100, (isNewDay ? '最新数据更新中' : '美股更新中') + ' · 写入云端…');
+                    await persistSectorCloudFull(isNewDay ? 'new-day' : 'manual-refresh');
+                  }
+                } catch (ePers) { console.warn('persist after refresh', ePers); }
                 hideSectorProgress('us', isNewDay ? '最新数据已更新' : ('美股已更新 · 东财 ' + emN2 + ' 只'));
               }
             } catch (eHide) {
@@ -14102,6 +14109,12 @@ const FALLBACK_SECTORS = {
               console.warn('cn paint after summary', e);
             }
           }
+          showCnUnified(98, (isNewDayCn ? '最新数据更新中' : 'A股刷新') + ' · 写入云端…');
+          try {
+            if (typeof persistSectorCloudCN === 'function') {
+              await persistSectorCloudCN(isNewDayCn ? 'new-day' : 'manual-refresh');
+            }
+          } catch (ePersCn) { console.warn('persist cn', ePersCn); }
           showCnUnified(100, isNewDayCn ? '最新数据已更新' : 'A股完整刷新完成');
           if (myTok === window.__sectorRefreshTok.cn) {
             hideSectorProgress('cn', isNewDayCn ? '最新数据已更新' : 'A股板块已完整刷新');
@@ -14257,35 +14270,90 @@ const FALLBACK_SECTORS = {
     /** 打开网页：从 D1 灌入东财美股全表（关网页时由 Worker Cron / 上次刷新写入） */
     async function hydrateSectorFromCloud() {
       try {
-        if (typeof cloudCacheGet !== 'function') return false;
-        var keys = ['sector:em_us_universe', 'sector:us:quotes'];
         var ok = false;
-        for (var ki = 0; ki < keys.length; ki++) {
+        var bestN = 0;
+        // 0) 本地全量（上次刷新成功写下的）
+        try {
+          var loc = localStorage.getItem('sector:em_us_local');
+          if (loc) {
+            var lo = JSON.parse(loc);
+            if (lo && lo.map && typeof lo.map === 'object') {
+              var lks = Object.keys(lo.map);
+              if (lks.length > bestN && lks.length >= 50) {
+                window.__emUSMap = window.__emUSMap || {};
+                lks.forEach(function (k) {
+                  var q = lo.map[k];
+                  if (!q || !(q.c > 0)) return;
+                  window.__emUSMap[k] = q;
+                });
+                window.__emUSMapAt = lo.at || Date.now();
+                window.__emUSMapTotal = lo.total || lks.length;
+                bestN = lks.length;
+                ok = true;
+              }
+            }
+          }
+        } catch (eLoc) {}
+        // 1) D1
+        if (typeof cloudCacheGet === 'function') {
+          var keys = ['sector:em_us_universe', 'sector:us:quotes'];
+          for (var ki = 0; ki < keys.length; ki++) {
+            try {
+              var wrap = await cloudCacheGet(keys[ki]);
+              if (!wrap || !wrap.data) continue;
+              var map = wrap.data.map || wrap.data.quotes || null;
+              if (!map || typeof map !== 'object') continue;
+              var ks = Object.keys(map);
+              if (ks.length < 50) continue;
+              // 只接受「不比本地更小」的云端快照，避免旧小表盖住新全量
+              if (ok && ks.length + 100 < bestN) continue;
+              window.__emUSMap = window.__emUSMap || {};
+              ks.forEach(function (k) {
+                var q = map[k];
+                if (!q || !(q.c > 0)) return;
+                q._cachedAt = q._cachedAt || wrap.data.at || Date.now();
+                window.__emUSMap[k] = q;
+                try {
+                  if (typeof putQuoteCache === 'function') putQuoteCache(k, q);
+                  else if (typeof quoteCache !== 'undefined') quoteCache[k] = q;
+                } catch (e1) {}
+              });
+              window.__emUSMapAt = wrap.data.at || Date.now();
+              window.__emUSMapTotal = wrap.data.total || ks.length;
+              bestN = Math.max(bestN, Object.keys(window.__emUSMap).length);
+              ok = true;
+            } catch (eOne) {}
+          }
+          // 分类缓存
           try {
-            var wrap = await cloudCacheGet(keys[ki]);
-            if (!wrap || !wrap.data) continue;
-            var map = wrap.data.map || wrap.data.quotes || null;
-            if (!map || typeof map !== 'object') continue;
-            var ks = Object.keys(map);
-            if (ks.length < 50) continue;
-            window.__emUSMap = window.__emUSMap || {};
-            ks.forEach(function (k) {
-              var q = map[k];
-              if (!q || !(q.c > 0)) return;
-              q._cachedAt = q._cachedAt || wrap.data.at || Date.now();
-              window.__emUSMap[k] = q;
-              try {
-                if (typeof putQuoteCache === 'function') putQuoteCache(k, q);
-                else if (typeof quoteCache !== 'undefined') quoteCache[k] = q;
-              } catch (e1) {}
-            });
-            window.__emUSMapAt = wrap.data.at || Date.now();
-            window.__emUSMapTotal = wrap.data.total || ks.length;
-            ok = true;
-            if (ks.length > 500) break;
-          } catch (eOne) {}
+            var wrapC = await cloudCacheGet('sector:us:em_class');
+            if (wrapC && wrapC.data) {
+              if (wrapC.data.byL1) window.__usEmByL1 = wrapC.data.byL1;
+              if (wrapC.data.byL2) window.__usEmByL2 = wrapC.data.byL2;
+              window.__usEmClassifiedAt = wrapC.data.at || Date.now();
+            }
+          } catch (eCl) {}
         }
+        try {
+          var locC = localStorage.getItem('sector:em_class_local');
+          if (locC) {
+            var lc = JSON.parse(locC);
+            if (lc && lc.byL2 && (!window.__usEmClassifiedAt || (lc.at || 0) >= (window.__usEmClassifiedAt || 0))) {
+              window.__usEmByL1 = lc.byL1 || window.__usEmByL1;
+              window.__usEmByL2 = lc.byL2 || window.__usEmByL2;
+              window.__usEmClassifiedAt = lc.at || Date.now();
+            }
+          }
+        } catch (eLc) {}
         if (ok) {
+          try {
+            if (!window.__usEmClassifiedAt && typeof classifyEmUSIntoSectors === 'function') {
+              classifyEmUSIntoSectors();
+            } else if (typeof classifyEmUSIntoSectors === 'function' && Object.keys(window.__emUSMap || {}).length > 500) {
+              // 有全表时重算一次，保证角标与 map 一致
+              classifyEmUSIntoSectors();
+            }
+          } catch (eCls) {}
           try { if (typeof saveQuoteCacheToDisk === 'function') saveQuoteCacheToDisk(); } catch (e2) {}
         }
         return ok;
@@ -14317,6 +14385,182 @@ const FALLBACK_SECTORS = {
           cloudCacheSetBg('sector:us:quotes', { map: slim, at: Date.now(), total: n, day: payload.day }, 2);
         }
       } catch (e) {}
+    }
+
+    /** 全量刷新收尾：同步写入 D1（await），避免关网页/重开后仍是旧角标 */
+    async function persistSectorCloudFull(reason) {
+      try {
+        if (typeof cloudCacheSet !== 'function') return { ok: false, reason: 'no-api' };
+        var map = window.__emUSMap || {};
+        var keys = Object.keys(map);
+        if (keys.length < 50) return { ok: false, reason: 'too-small', n: keys.length };
+        try {
+          if (typeof classifyEmUSIntoSectors === 'function') classifyEmUSIntoSectors();
+        } catch (eCl) {}
+        var day = (new Date()).toISOString().slice(0, 10);
+        var at = Date.now();
+        var slim = {};
+        keys.forEach(function (k) {
+          var q = map[k];
+          if (!q || !(q.c > 0)) return;
+          slim[k] = {
+            c: q.c, d: q.d, dp: q.dp, h: q.h, l: q.l, o: q.o, pc: q.pc,
+            name: q.name || '', industry: q.industry || '',
+            _cachedAt: q._cachedAt || at, _src: q._src || 'em_us'
+          };
+        });
+        var n = Object.keys(slim).length;
+        var payloadQuotes = { map: slim, at: at, total: n, day: day, source: reason || 'persist' };
+        var payloadUni = { map: slim, at: at, total: n, day: day, source: reason || 'persist' };
+        var payloadMeta = {
+          day: day, at: at, usCount: n, usTotal: n,
+          source: reason || 'persist',
+          emByL1: (function () {
+            var o = {}, src = window.__usEmByL1 || {};
+            Object.keys(src).forEach(function (id) { o[id] = (src[id] || []).length; });
+            return o;
+          })()
+        };
+        // 分类明细（代码列表）单独存，打开可秒恢复大角标
+        var classPayload = {
+          day: day, at: at,
+          byL1: window.__usEmByL1 || {},
+          byL2: window.__usEmByL2 || {}
+        };
+        // 本地也留一份，防 D1 失败时重开仍能用
+        try {
+          localStorage.setItem('sector:em_us_local', JSON.stringify({
+            day: day, at: at, total: n, map: slim
+          }));
+        } catch (eLoc) {
+          try {
+            // 太大则只存分类
+            localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
+          } catch (e2) {}
+        }
+        try {
+          localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
+        } catch (e3) {}
+
+        var r1 = await cloudCacheSet('sector:us:quotes', payloadQuotes, 2);
+        var r2 = await cloudCacheSet('sector:em_us_universe', payloadUni, 2);
+        var r3 = await cloudCacheSet('sector:daily:meta', payloadMeta, 3);
+        var r4 = await cloudCacheSet('sector:us:em_class', classPayload, 2);
+        console.log('[persistSectorCloudFull]', reason, n, r1, r2, r3, r4);
+        return { ok: !!(r1 || r2), n: n, r1: r1, r2: r2, r3: r3, r4: r4 };
+      } catch (e) {
+        console.warn('persistSectorCloudFull', e);
+        return { ok: false, error: String(e) };
+      }
+    }
+
+    /** A股全量刷新收尾：写入 D1 + localStorage，避免重开变旧 */
+    async function persistSectorCloudCN(reason) {
+      try {
+        var day = (new Date()).toISOString().slice(0, 10);
+        var at = Date.now();
+        var boards = [];
+        try {
+          if (typeof cnBoardCache !== 'undefined' && cnBoardCache && cnBoardCache.length) {
+            boards = cnBoardCache.map(function (b) {
+              return {
+                board: b.board || b.code || '',
+                name: b.name || '',
+                chg: b.chg,
+                count: b.count,
+                hasChg: b.hasChg
+              };
+            }).filter(function (x) { return x.board; });
+          }
+        } catch (eB) {}
+        var meta = {};
+        try {
+          Object.keys(window.__cnBoardMeta || {}).forEach(function (bk) {
+            var m = window.__cnBoardMeta[bk];
+            if (!m) return;
+            meta[bk] = { count: m.count, name: m.name, chg: m.chg };
+          });
+        } catch (eM) {}
+        var stocks = {};
+        try {
+          var sc = window.__cnBoardStocksCache || {};
+          Object.keys(sc).forEach(function (bk) {
+            var arr = sc[bk];
+            if (!Array.isArray(arr) || !arr.length) return;
+            stocks[bk] = arr.slice(0, 400).map(function (s) {
+              if (typeof s === 'string') return s;
+              return { code: s.code || s.symbol || '', name: s.name || '', chg: s.chg, price: s.price };
+            });
+          });
+        } catch (eS) {}
+        var payload = { day: day, at: at, source: reason || 'persist-cn', boards: boards, meta: meta, stocks: stocks };
+        try {
+          localStorage.setItem('sector:cn_boards_local', JSON.stringify(payload));
+        } catch (eLoc) {
+          try {
+            localStorage.setItem('sector:cn_boards_local', JSON.stringify({
+              day: day, at: at, boards: boards, meta: meta, source: reason || 'persist-cn'
+            }));
+          } catch (e2) {}
+        }
+        var ok = false;
+        if (typeof cloudCacheSet === 'function') {
+          ok = await cloudCacheSet('sector:cn:boards', payload, 2);
+          try {
+            await cloudCacheSet('sector:daily:meta:cn', {
+              day: day, at: at, boardN: boards.length,
+              metaN: Object.keys(meta).length, source: reason || 'persist-cn'
+            }, 3);
+          } catch (eM2) {}
+        }
+        console.log('[persistSectorCloudCN]', reason, boards.length, Object.keys(meta).length, ok);
+        return { ok: ok, boardN: boards.length };
+      } catch (e) {
+        console.warn('persistSectorCloudCN', e);
+        return { ok: false, error: String(e) };
+      }
+    }
+
+    async function hydrateSectorCNFromCloud() {
+      try {
+        var payload = null;
+        try {
+          var loc = localStorage.getItem('sector:cn_boards_local');
+          if (loc) payload = JSON.parse(loc);
+        } catch (eL) {}
+        if (typeof cloudCacheGet === 'function') {
+          try {
+            var wrap = await cloudCacheGet('sector:cn:boards');
+            if (wrap && wrap.data && Array.isArray(wrap.data.boards)) {
+              if (!payload || (wrap.data.at || 0) >= (payload.at || 0)) {
+                if (wrap.data.boards.length > 0 || !payload) payload = wrap.data;
+              }
+            }
+          } catch (eC) {}
+        }
+        if (!payload) return false;
+        if (payload.boards && payload.boards.length) {
+          cnBoardCache = payload.boards;
+          window.__cnBoardCacheAt = payload.at || Date.now();
+        }
+        if (payload.meta && typeof payload.meta === 'object') {
+          window.__cnBoardMeta = window.__cnBoardMeta || {};
+          Object.keys(payload.meta).forEach(function (bk) {
+            window.__cnBoardMeta[bk] = Object.assign({}, window.__cnBoardMeta[bk] || {}, payload.meta[bk]);
+          });
+        }
+        if (payload.stocks && typeof payload.stocks === 'object') {
+          window.__cnBoardStocksCache = window.__cnBoardStocksCache || {};
+          Object.keys(payload.stocks).forEach(function (bk) {
+            if (payload.stocks[bk] && payload.stocks[bk].length) {
+              window.__cnBoardStocksCache[bk] = payload.stocks[bk];
+            }
+          });
+        }
+        return !!(payload.boards && payload.boards.length);
+      } catch (e) {
+        return false;
+      }
     }
 
     async function fetchEMUSPage(pn, pz) {
@@ -14717,7 +14961,10 @@ const FALLBACK_SECTORS = {
           try {
             if (!window.__sectorCloudHydratedOnce) {
               window.__sectorCloudHydratedOnce = true;
-              await hydrateSectorFromCloud();
+              var hydOk = await hydrateSectorFromCloud();
+              if (hydOk) {
+                try { window.__sectorNewDayForcePaint = true; } catch (eFp) {}
+              }
             }
           } catch (eHyd) {}
           // 美股：全量刷新进行中时不要并行再刷，避免两套数字来回跳
@@ -16197,6 +16444,15 @@ async function fetchCNConceptList(po) {
         container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载A股大类...</div>';
       }
       cnSectorView = 'l1';
+      // 打开/切到 A股：先灌本地+D1 上次全量刷新结果，避免重开又是空/旧
+      try {
+        if (!window.__sectorCNCloudHydratedOnce) {
+          window.__sectorCNCloudHydratedOnce = true;
+          if (typeof hydrateSectorCNFromCloud === 'function') {
+            await hydrateSectorCNFromCloud();
+          }
+        }
+      } catch (eHydCn) {}
       let universe = [];
       try {
         universe = await loadCNBoardUniverse();
