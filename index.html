@@ -14294,8 +14294,62 @@ const FALLBACK_SECTORS = {
             }
           }
         } catch (eLoc) {}
-        // 1) D1
+        // 1) D1（支持分片 sector:us:quotes:0..N）
         if (typeof cloudCacheGet === 'function') {
+          async function mergeCloudMap(baseKey) {
+            try {
+              var wrap0 = await cloudCacheGet(baseKey);
+              if (!wrap0 || !wrap0.data) return 0;
+              var d0 = wrap0.data;
+              var merged = {};
+              var added = 0;
+              if (d0.map && typeof d0.map === 'object' && !d0.chunked) {
+                Object.keys(d0.map).forEach(function (k) {
+                  var q = d0.map[k];
+                  if (q && q.c > 0) { merged[k] = q; added++; }
+                });
+              }
+              var cn = Number(d0.chunks) || 0;
+              if (d0.chunked || cn > 0) {
+                for (var ci = 0; ci < (cn || 20); ci++) {
+                  try {
+                    var wc = await cloudCacheGet(baseKey + ':' + ci);
+                    if (!wc || !wc.data || !wc.data.map) {
+                      if (cn && ci >= cn) break;
+                      if (!cn && ci > 2 && added > 0) break;
+                      continue;
+                    }
+                    Object.keys(wc.data.map).forEach(function (k) {
+                      var q = wc.data.map[k];
+                      if (q && q.c > 0) { merged[k] = q; added++; }
+                    });
+                    if (cn && ci + 1 >= cn) break;
+                  } catch (eC) {}
+                }
+              }
+              var mks = Object.keys(merged);
+              if (mks.length < 50) return 0;
+              if (ok && mks.length + 100 < bestN) return 0;
+              window.__emUSMap = window.__emUSMap || {};
+              mks.forEach(function (k) {
+                var q = merged[k];
+                q._cachedAt = q._cachedAt || d0.at || Date.now();
+                window.__emUSMap[k] = q;
+                try {
+                  if (typeof putQuoteCache === 'function') putQuoteCache(k, q);
+                  else if (typeof quoteCache !== 'undefined') quoteCache[k] = q;
+                } catch (e1) {}
+              });
+              window.__emUSMapAt = d0.at || Date.now();
+              window.__emUSMapTotal = d0.total || mks.length;
+              bestN = Math.max(bestN, Object.keys(window.__emUSMap).length);
+              ok = true;
+              return mks.length;
+            } catch (e) { return 0; }
+          }
+          await mergeCloudMap('sector:em_us_universe');
+          await mergeCloudMap('sector:us:quotes');
+          // 兼容旧单包 key（若上面分片没有）
           var keys = ['sector:em_us_universe', 'sector:us:quotes'];
           for (var ki = 0; ki < keys.length; ki++) {
             try {
@@ -14305,7 +14359,6 @@ const FALLBACK_SECTORS = {
               if (!map || typeof map !== 'object') continue;
               var ks = Object.keys(map);
               if (ks.length < 50) continue;
-              // 只接受「不比本地更小」的云端快照，避免旧小表盖住新全量
               if (ok && ks.length + 100 < bestN) continue;
               window.__emUSMap = window.__emUSMap || {};
               ks.forEach(function (k) {
@@ -14388,6 +14441,18 @@ const FALLBACK_SECTORS = {
     }
 
     /** 全量刷新收尾：同步写入 D1（await），避免关网页/重开后仍是旧角标 */
+    function sectorLocalDayStr() {
+      try {
+        var d = new Date();
+        var y = d.getFullYear();
+        var m = String(d.getMonth() + 1).padStart(2, '0');
+        var day = String(d.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + day;
+      } catch (e) {
+        return new Date().toISOString().slice(0, 10);
+      }
+    }
+
     async function persistSectorCloudFull(reason) {
       try {
         if (typeof cloudCacheSet !== 'function') return { ok: false, reason: 'no-api' };
@@ -14397,57 +14462,85 @@ const FALLBACK_SECTORS = {
         try {
           if (typeof classifyEmUSIntoSectors === 'function') classifyEmUSIntoSectors();
         } catch (eCl) {}
-        var day = (new Date()).toISOString().slice(0, 10);
+        var day = sectorLocalDayStr();
         var at = Date.now();
+        // 字段尽量短，降低 D1/Worker 体积限制导致整包失败
         var slim = {};
         keys.forEach(function (k) {
           var q = map[k];
           if (!q || !(q.c > 0)) return;
           slim[k] = {
             c: q.c, d: q.d, dp: q.dp, h: q.h, l: q.l, o: q.o, pc: q.pc,
-            name: q.name || '', industry: q.industry || '',
-            _cachedAt: q._cachedAt || at, _src: q._src || 'em_us'
+            name: q.name || ''
           };
         });
-        var n = Object.keys(slim).length;
-        var payloadQuotes = { map: slim, at: at, total: n, day: day, source: reason || 'persist' };
-        var payloadUni = { map: slim, at: at, total: n, day: day, source: reason || 'persist' };
+        var allKeys = Object.keys(slim);
+        var n = allKeys.length;
+        var classPayload = {
+          day: day, at: at,
+          byL1: window.__usEmByL1 || {},
+          byL2: window.__usEmByL2 || {}
+        };
+        try {
+          localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
+        } catch (e3) {}
+        try {
+          localStorage.setItem('sector:em_us_local', JSON.stringify({
+            day: day, at: at, total: n, map: slim
+          }));
+        } catch (eLoc) {}
+
+        // 分片写入报价（每片约 2500 只），避免单 key 过大写失败
+        var CHUNK = 2500;
+        var chunkN = Math.ceil(n / CHUNK) || 1;
+        var chunkOk = 0;
+        for (var ci = 0; ci < chunkN; ci++) {
+          var part = {};
+          var slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
+          for (var si = 0; si < slice.length; si++) {
+            part[slice[si]] = slim[slice[si]];
+          }
+          var okC = await cloudCacheSet('sector:us:quotes:' + ci, {
+            day: day, at: at, total: n, chunk: ci, chunks: chunkN,
+            map: part, source: reason || 'persist'
+          }, 2);
+          if (okC) chunkOk++;
+        }
+        // 索引：打开时按 chunks 拼回；并写一份精简总表兼容旧 Cron
+        var rIdx = await cloudCacheSet('sector:us:quotes', {
+          day: day, at: at, total: n, chunks: chunkN, source: reason || 'persist', chunked: true
+        }, 2);
+        // universe 也分片（同内容，key 不同给 hydrate 兼容）
+        var uniOk = 0;
+        for (var ui = 0; ui < chunkN; ui++) {
+          var partU = {};
+          var sliceU = allKeys.slice(ui * CHUNK, (ui + 1) * CHUNK);
+          for (var uj = 0; uj < sliceU.length; uj++) {
+            partU[sliceU[uj]] = slim[sliceU[uj]];
+          }
+          var okU = await cloudCacheSet('sector:em_us_universe:' + ui, {
+            day: day, at: at, total: n, chunk: ui, chunks: chunkN, map: partU
+          }, 2);
+          if (okU) uniOk++;
+        }
+        await cloudCacheSet('sector:em_us_universe', {
+          day: day, at: at, total: n, chunks: chunkN, chunked: true, source: reason || 'persist'
+        }, 2);
+
         var payloadMeta = {
           day: day, at: at, usCount: n, usTotal: n,
           source: reason || 'persist',
+          chunks: chunkN, chunkOk: chunkOk,
           emByL1: (function () {
             var o = {}, src = window.__usEmByL1 || {};
             Object.keys(src).forEach(function (id) { o[id] = (src[id] || []).length; });
             return o;
           })()
         };
-        // 分类明细（代码列表）单独存，打开可秒恢复大角标
-        var classPayload = {
-          day: day, at: at,
-          byL1: window.__usEmByL1 || {},
-          byL2: window.__usEmByL2 || {}
-        };
-        // 本地也留一份，防 D1 失败时重开仍能用
-        try {
-          localStorage.setItem('sector:em_us_local', JSON.stringify({
-            day: day, at: at, total: n, map: slim
-          }));
-        } catch (eLoc) {
-          try {
-            // 太大则只存分类
-            localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
-          } catch (e2) {}
-        }
-        try {
-          localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
-        } catch (e3) {}
-
-        var r1 = await cloudCacheSet('sector:us:quotes', payloadQuotes, 2);
-        var r2 = await cloudCacheSet('sector:em_us_universe', payloadUni, 2);
         var r3 = await cloudCacheSet('sector:daily:meta', payloadMeta, 3);
         var r4 = await cloudCacheSet('sector:us:em_class', classPayload, 2);
-        console.log('[persistSectorCloudFull]', reason, n, r1, r2, r3, r4);
-        return { ok: !!(r1 || r2), n: n, r1: r1, r2: r2, r3: r3, r4: r4 };
+        console.log('[persistSectorCloudFull]', reason, n, 'chunks', chunkN, 'ok', chunkOk, rIdx, r3, r4);
+        return { ok: chunkOk > 0, n: n, chunkOk: chunkOk, chunks: chunkN, r3: r3, r4: r4 };
       } catch (e) {
         console.warn('persistSectorCloudFull', e);
         return { ok: false, error: String(e) };
