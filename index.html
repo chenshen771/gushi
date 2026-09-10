@@ -10800,6 +10800,36 @@ async function openDetail(symbol, isRestore) {
       return window.__chartLoadTok;
     }
 
+
+    function parseChartTimeToDate(time) {
+      try {
+        if (time == null) return null;
+        if (typeof time === 'object') {
+          if (time.timestamp != null) return new Date(Number(time.timestamp) * 1000);
+          if (time.year != null) return new Date(time.year, (time.month || 1) - 1, time.day || 1);
+        }
+        if (typeof time === 'string' && time.indexOf('-') >= 0) {
+          var p = time.split('-');
+          return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+        }
+        var n = Number(time);
+        if (!isNaN(n)) return new Date(n * 1000);
+      } catch (e) {}
+      return null;
+    }
+    /** 精简图：12 小时制，12 点显示 12 不是 00/24 */
+    function formatChartTime12h(time) {
+      try {
+        var d = parseChartTimeToDate(time);
+        if (!d || isNaN(d.getTime())) return '';
+        var h = d.getHours();
+        var m = String(d.getMinutes()).padStart(2, '0');
+        var h12 = h % 12;
+        if (h12 === 0) h12 = 12;
+        return h12 + ':' + m;
+      } catch (e) { return ''; }
+    }
+
     async function loadMiniSparkChart(symbol) {
       const wrap = document.getElementById('tvChart');
       if (!wrap) return;
@@ -10969,10 +10999,28 @@ async function openDetail(symbol, isRestore) {
           grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
           crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
           rightPriceScale: { borderColor: '#1e293b' },
+          localization: {
+            locale: 'en-US',
+            timeFormatter: function (time) {
+              return formatChartTime12h(time);
+            },
+            dateFormat: 'MM/dd'
+          },
           timeScale: {
             borderColor: '#1e293b',
             timeVisible: mode !== '1d',
-            secondsVisible: false
+            secondsVisible: false,
+            // 底部刻度必须用 tickMarkFormatter，只写 timeFormatter 不会改坐标轴
+            tickMarkFormatter: function (time, tickMarkType) {
+              try {
+                if (mode === '1d' || mode === 'D') {
+                  var d0 = parseChartTimeToDate(time);
+                  if (!d0) return '';
+                  return (d0.getMonth() + 1) + '/' + d0.getDate();
+                }
+                return formatChartTime12h(time);
+              } catch (e) { return ''; }
+            }
           },
           handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
           handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true }
@@ -11135,7 +11183,201 @@ async function openDetail(symbol, isRestore) {
     }
 
     
-function loadFullTVChart(symbol) {
+
+    /** 完整图加载前探活：有报价视为代码可用（不读 TV 跨域报错） */
+    
+    /** 完整图交易所偏好：本地 + 云端 D1 双写 */
+    function readTvExchPrefLocal() {
+      try {
+        return JSON.parse(localStorage.getItem('tvExchPref') || '{}') || {};
+      } catch (e) {
+        return {};
+      }
+    }
+    function writeTvExchPrefLocal(map) {
+      try {
+        localStorage.setItem('tvExchPref', JSON.stringify(map || {}));
+      } catch (e) {}
+    }
+    function saveTvExchPref(code, ex) {
+      var c = String(code || '').toUpperCase().replace(/^(NASDAQ|NYSE|AMEX|OTC):/i, '');
+      var e = String(ex || '').toUpperCase();
+      if (!c || !/^(NASDAQ|NYSE|AMEX|OTC)$/.test(e)) return;
+      var map = readTvExchPrefLocal();
+      map[c] = e;
+      writeTvExchPrefLocal(map);
+      // 云端长期保存（365 天），换设备也能用
+      try {
+        if (typeof cloudCacheSetBg === 'function') {
+          cloudCacheSetBg('tv:exchPref', { map: map, at: Date.now() }, 365);
+        } else if (typeof cloudCacheSet === 'function') {
+          cloudCacheSet('tv:exchPref', { map: map, at: Date.now() }, 365);
+        }
+      } catch (eCloud) {}
+    }
+    async function hydrateTvExchPrefFromCloud() {
+      try {
+        if (typeof cloudCacheGet !== 'function') return readTvExchPrefLocal();
+        var wrap = await cloudCacheGet('tv:exchPref');
+        var cloudMap = wrap && wrap.data && (wrap.data.map || wrap.data);
+        if (!cloudMap || typeof cloudMap !== 'object') return readTvExchPrefLocal();
+        var local = readTvExchPrefLocal();
+        var merged = Object.assign({}, cloudMap, local); // 本地覆盖云端（更新）
+        // 若云端有本地没有的，补进来
+        Object.keys(cloudMap).forEach(function (k) {
+          if (!local[k] && cloudMap[k]) merged[k] = cloudMap[k];
+        });
+        // 本地更新过的以本地为准
+        Object.keys(local).forEach(function (k) {
+          if (local[k]) merged[k] = local[k];
+        });
+        writeTvExchPrefLocal(merged);
+        return merged;
+      } catch (e) {
+        return readTvExchPrefLocal();
+      }
+    }
+
+async function probeSymbolForTV(fullSym) {
+      var raw = String(fullSym || '').trim();
+      if (!raw) return false;
+      var bare = raw.replace(/^(NASDAQ|NYSE|AMEX|OTC|SSE|SZSE|BSE):/i, '');
+      var wantEx = null;
+      var mEx = raw.match(/^(NASDAQ|NYSE|AMEX|OTC):/i);
+      if (mEx) wantEx = mEx[1].toUpperCase();
+
+      // A股：东财探活
+      if (/^(SSE|SZSE|BSE):/i.test(raw) || /^\d{6}$/.test(bare)) {
+        try {
+          var code = bare.replace(/\D/g, '').slice(-6);
+          if (code.length === 6) {
+            var mkt = code.charAt(0) === '6' ? '1' : '0';
+            if (/^SSE:/i.test(raw)) mkt = '1';
+            if (/^SZSE:/i.test(raw)) mkt = '0';
+            if (/^BSE:/i.test(raw)) mkt = '0';
+            var emUrl = 'https://push2delay.eastmoney.com/api/qt/stock/get?secid=' + mkt + '.' + code + '&fields=f43,f58';
+            var em = null;
+            if (typeof fetchViaProxies === 'function') em = await fetchViaProxies(emUrl);
+            else {
+              var u = (typeof WORKER_BASE !== 'undefined' && WORKER_BASE)
+                ? WORKER_BASE + '?url=' + encodeURIComponent(emUrl) : emUrl;
+              var res = await fetch(u, { cache: 'no-store' });
+              em = await res.json();
+            }
+            var d = em && (em.data || em);
+            if (d && (d.f43 > 0 || d.f58)) return true;
+          }
+        } catch (eEm) {}
+        return false;
+      }
+
+      // 美股：先确认有报价
+      var hasQuote = false;
+      try {
+        var qUrl = null;
+        if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+          qUrl = WORKER_BASE.replace(/\?.*$/, '') + '/api/quote?symbol=' + encodeURIComponent(bare);
+        } else if (typeof FINNHUB_KEY !== 'undefined' && FINNHUB_KEY) {
+          qUrl = 'https://finnhub.io/api/v1/quote?symbol=' + encodeURIComponent(bare) + '&token=' + encodeURIComponent(FINNHUB_KEY);
+        }
+        if (qUrl) {
+          var qr = await fetch(qUrl, { cache: 'no-store' });
+          var qj = await qr.json();
+          if (qj && qj.data) qj = qj.data;
+          if (qj && qj.c != null && Number(qj.c) > 0) hasQuote = true;
+        }
+      } catch (eFh) {}
+      if (!hasQuote) {
+        try {
+          var yUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(bare) +
+            '?interval=1d&range=5d';
+          var yd = null;
+          if (typeof fetchViaProxies === 'function') yd = await fetchViaProxies(yUrl);
+          else {
+            var yu = (typeof WORKER_BASE !== 'undefined' && WORKER_BASE)
+              ? WORKER_BASE + '?url=' + encodeURIComponent(yUrl) : yUrl;
+            var yr = await fetch(yu, { cache: 'no-store' });
+            yd = await yr.json();
+          }
+          var meta = yd && yd.chart && yd.chart.result && yd.chart.result[0] && yd.chart.result[0].meta;
+          if (meta && (meta.regularMarketPrice > 0 || meta.previousClose > 0)) hasQuote = true;
+        } catch (eY) {}
+      }
+      if (!hasQuote) return false;
+
+      // 指定了交易所时：核对真实上市地（解决 NASDAQ:AM 有价但 TV 无效）
+      if (wantEx) {
+        try {
+          var gotEx = null;
+          // Finnhub profile2
+          var pUrl = null;
+          if (typeof FINNHUB_KEY !== 'undefined' && FINNHUB_KEY) {
+            pUrl = 'https://finnhub.io/api/v1/stock/profile2?symbol=' + encodeURIComponent(bare) +
+              '&token=' + encodeURIComponent(FINNHUB_KEY);
+          }
+          if (pUrl) {
+            var pu = (typeof WORKER_BASE !== 'undefined' && WORKER_BASE)
+              ? WORKER_BASE + '?url=' + encodeURIComponent(pUrl) : pUrl;
+            var pr = await fetch(pu, { cache: 'no-store' });
+            var pj = await pr.json();
+            if (pj && pj.contents) { try { pj = JSON.parse(pj.contents); } catch (e0) {} }
+            if (pj && pj.data && !pj.exchange) pj = pj.data;
+            var exStr = String((pj && (pj.exchange || pj.mic)) || '').toUpperCase();
+            if (exStr) {
+              if (/NASDAQ|XNAS|NMS|NGS|NCM/.test(exStr)) gotEx = 'NASDAQ';
+              else if (/NYSE|XNYS|NEW YORK/.test(exStr)) gotEx = 'NYSE';
+              else if (/AMEX|XASE|ARCA|NYSE MKT|NYSE ARCA/.test(exStr)) gotEx = 'AMEX';
+              else if (/OTC|PINK|OOTC/.test(exStr)) gotEx = 'OTC';
+            }
+          }
+          // Yahoo 补充
+          if (!gotEx) {
+            try {
+              var y2 = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(bare) +
+                '?interval=1d&range=5d';
+              var yd2 = (typeof fetchViaProxies === 'function') ? await fetchViaProxies(y2) : null;
+              var meta2 = yd2 && yd2.chart && yd2.chart.result && yd2.chart.result[0] && yd2.chart.result[0].meta;
+              var fe = String((meta2 && (meta2.fullExchangeName || meta2.exchangeName || meta2.exchange)) || '').toUpperCase();
+              if (/NASDAQ/.test(fe)) gotEx = 'NASDAQ';
+              else if (/NYSE/.test(fe) && !/ARCA|MKT/.test(fe)) gotEx = 'NYSE';
+              else if (/AMEX|ARCA/.test(fe)) gotEx = 'AMEX';
+            } catch (eY2) {}
+          }
+          if (gotEx && gotEx !== wantEx) {
+            // 交易所不一致 → 当作失效，弹手动切换（不自动换）
+            console.log('[probeTV] exchange mismatch', bare, 'want', wantEx, 'got', gotEx);
+            return false;
+          }
+        } catch (eProf) {}
+      }
+      return true;
+    }
+
+function mountFullTVIframe(rawSym, myTok) {
+      const wrap = document.getElementById('tvChart');
+      if (!wrap) return;
+      if (myTok !== window.__chartLoadTok) return;
+      const raw = String(rawSym || 'AAPL');
+      const sym = encodeURIComponent(raw);
+      const isCN = /^SSE:|^SZSE:|^BSE:/.test(raw);
+      const tz = isCN ? 'Asia%2FShanghai' : 'America%2FNew_York';
+      const fid = 'tv_' + myTok + '_' + Date.now();
+      const src = 'https://s.tradingview.com/widgetembed/?' +
+        'frameElementId=' + fid +
+        '&symbol=' + sym +
+        '&interval=D&theme=dark&style=1&timezone=' + tz +
+        '&locale=en&withdateranges=0&hideideas=1&symboledit=0&saveimage=0' +
+        '&hidesidetoolbar=1&hidetoptoolbar=0&hidevolume=0&toolbarbg=0d1117';
+      wrap.innerHTML = '<iframe id="' + fid + '" src="' + src +
+        '" style="width:100%;height:320px;border:0;border-radius:10px;background:#0d1117;" ' +
+        'allowtransparency="true" scrolling="no" frameborder="0"></iframe>';
+      try {
+        if (window.__tvExchTimer) clearTimeout(window.__tvExchTimer);
+        hideTVExchOverlay();
+      } catch (eOv) {}
+    }
+
+    async function loadFullTVChart(symbol) {
       const wrap = document.getElementById('tvChart');
       if (!wrap) return;
       try {
@@ -11144,43 +11386,49 @@ function loadFullTVChart(symbol) {
         wrap.style.position = 'relative';
       } catch (eW) {}
       const myTok = (window.__chartLoadTok = (window.__chartLoadTok || 0) + 1);
-      const raw = String(symbol || 'AAPL');
-      const sym = encodeURIComponent(raw);
-      const isCN = /^SSE:|^SZSE:|^BSE:/.test(raw);
-      const tz = isCN ? 'Asia%2FShanghai' : 'America%2FNew_York';
-      const fid = 'tv_' + myTok + '_' + Date.now();
-      // 先占位，避免仍显示上一只
+      let raw = String(symbol || 'AAPL');
       wrap.innerHTML = '<div style="width:100%;height:320px;display:flex;align-items:center;justify-content:center;background:#0d1117;border-radius:10px;"><div class="detail-loading chart"><div class="dl-spin"></div><div>走势图加载中…</div></div></div>';
-      // locale 用 en 减少「此商品不存在」误报；允许改代码便于手动纠正交易所
-      const src = 'https://s.tradingview.com/widgetembed/?' +
-        'frameElementId=' + fid +
-        '&symbol=' + sym +
-        '&interval=D&theme=dark&style=1&timezone=' + tz +
-        '&locale=en&withdateranges=1&hideideas=1&symboledit=1&saveimage=0' +
-        '&hidesidetoolbar=0&hidetoptoolbar=0&hidevolume=0&toolbarbg=0d1117';
-      // 下一帧再挂 iframe，若期间又切了票则放弃
-      setTimeout(function () {
-        if (myTok !== window.__chartLoadTok) return;
-        const w = document.getElementById('tvChart');
-        if (!w) return;
-        w.innerHTML = '<iframe id="' + fid + '" src="' + src +
-          '" style="width:100%;height:320px;border:0;border-radius:10px;background:#0d1117;" ' +
-          'allowtransparency="true" scrolling="no" frameborder="0"></iframe>';
-        // 无法读取跨域 TV 报错，延迟后在图上提供「切换交易所」（图正常可点关闭）
+
+      var isUSEx = /^(NASDAQ|NYSE|AMEX|OTC):/i.test(raw);
+      var bare = raw.replace(/^(NASDAQ|NYSE|AMEX|OTC):/i, '').toUpperCase();
+
+      // 若用户曾手动选过交易所：先合并云端记忆，再优先本地
+      if (isUSEx && bare) {
         try {
-          if (window.__tvExchTimer) clearTimeout(window.__tvExchTimer);
-          hideTVExchOverlay();
-          var rawNow = String(raw || '');
-          if (/^(NASDAQ|NYSE):/i.test(rawNow)) {
-            window.__tvExchTimer = setTimeout(function () {
-              if (myTok !== window.__chartLoadTok) return;
-              if (typeof chartStyle !== 'undefined' && chartStyle !== 'full') return;
-              // 无法读跨域 iframe 是否报错：底部出「切换代码」芯片，点开可选 NASDAQ/NYSE
-              if (typeof showTVExchChip === 'function') showTVExchChip(rawNow);
-            }, 1800);
+          var prefMap = readTvExchPrefLocal();
+          try {
+            if (typeof hydrateTvExchPrefFromCloud === 'function') {
+              prefMap = await hydrateTvExchPrefFromCloud();
+            }
+          } catch (eHyd) {}
+          var prefEx = prefMap[bare];
+          if (prefEx && /^(NASDAQ|NYSE|AMEX|OTC)$/i.test(prefEx)) {
+            raw = prefEx.toUpperCase() + ':' + bare;
+            try { lastChartSymbol = raw; } catch (eL0) {}
           }
-        } catch (eOv) {}
-      }, 0);
+        } catch (ePref) {}
+      }
+
+      try {
+        var ok = await probeSymbolForTV(raw);
+        if (myTok !== window.__chartLoadTok) return;
+
+        // 探活失败：不自动换所，只弹窗让你手动选；仍挂当前代码方便对照
+        if (!ok && isUSEx) {
+          mountFullTVIframe(raw, myTok);
+          try {
+            if (typeof showTVExchChip === 'function') showTVExchChip(raw);
+            if (typeof showTVExchOverlay === 'function') showTVExchOverlay(raw);
+          } catch (eShow) {}
+          return;
+        }
+
+        // 探活成功：静默加载，不弹
+        mountFullTVIframe(raw, myTok);
+      } catch (eAll) {
+        if (myTok !== window.__chartLoadTok) return;
+        mountFullTVIframe(raw, myTok);
+      }
     }
 
     function loadTVChart(symbol) {
@@ -11365,10 +11613,13 @@ function loadFullTVChart(symbol) {
         if (!ex) return;
         var next = ex + ':' + code;
         try {
-          var prefMap = {};
-          try { prefMap = JSON.parse(localStorage.getItem('tvExchPref') || '{}') || {}; } catch (e0) {}
-          prefMap[code] = ex;
-          localStorage.setItem('tvExchPref', JSON.stringify(prefMap));
+          if (typeof saveTvExchPref === 'function') saveTvExchPref(code, ex);
+          else {
+            var prefMap = {};
+            try { prefMap = JSON.parse(localStorage.getItem('tvExchPref') || '{}') || {}; } catch (e0) {}
+            prefMap[code] = ex;
+            localStorage.setItem('tvExchPref', JSON.stringify(prefMap));
+          }
         } catch (e1) {}
         lastChartSymbol = next;
         hideTVExchOverlay();
