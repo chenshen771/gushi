@@ -15088,23 +15088,22 @@ const FALLBACK_SECTORS = {
                 if (g >= t) pct = 95;
               }
             } catch (eCap) {}
-            var lab = label || ('美股刷新 · ' + pct + '%');
+            var lab = label || ('美股刷新 · 东财 · ' + g + '/' + t);
             var busy = window.__sectorRefreshBusy && window.__sectorRefreshBusy.us;
             if (typeof showSectorProgress === 'function' && (busy || isSectorPageActive())) {
               try {
                 if (!window.__sectorRefreshBusy) window.__sectorRefreshBusy = {};
-                // 仅在「本趟仍有效且未取消」时才临时点亮 busy
                 if (!busy && isSectorPageActive() && sectorMarket === 'us' &&
                     !(typeof emUSCancelled === 'function' && emUSCancelled())) {
                   window.__sectorRefreshBusy.us = true;
                   window.__emUSTempBusy = true;
                 }
               } catch (eB) {}
-              // 若已取消则不要再 show
               if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
               if (!(window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) &&
                   !(typeof isSectorPageActive === 'function' && isSectorPageActive())) return;
-              showSectorProgress('us', pct, 100, lab);
+              // 分母用全市场 total，分子用本趟有效只数（与文案一致）
+              showSectorProgress('us', g, t, lab);
             } else if (typeof setSectorToast === 'function') {
               if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
               setSectorToast(true, lab, 60000, 'us');
@@ -15122,7 +15121,7 @@ const FALLBACK_SECTORS = {
           } catch (eC) { return false; }
         }
         // 准备阶段：先亮出「共多少只」，再开拉（对齐 A 股「准备 x/y」）
-        reportEmUSProgress(0, 100, '美股刷新 · 准备 · 共' + total + '只');
+        reportEmUSProgress(0, total, '美股刷新 · 准备 · 共' + total + '只');
         try {
           if (typeof setSectorToast === 'function') {
             setSectorToast(false); // 进度条已显示，不再叠一层 toast
@@ -15168,40 +15167,41 @@ const FALLBACK_SECTORS = {
           return n;
         }
 
-        ingestDiff(diff0);
-        try {
-          reportEmUSProgress(1, Math.max(1, Math.ceil(total / 100)), '东财美股拉取中…');
-        } catch (e0p) {}
+        var sessionGot = ingestDiff(diff0) || 0;
         var pageSize = 100;
         var pages = Math.max(1, Math.ceil(total / pageSize));
         var CONC = 5;
         var deadline = Date.now() + 75 * 1000; // 整次最多 75 秒，防止永远卡在 89%
         var stagnant = 0;
-        var lastGot = Object.keys(window.__emUSMap || {}).length;
+        var lastSessionGot = sessionGot;
+        // 进度/文案都按「本趟有效只数 / 全市场 total」，不显示页数
+        try {
+          reportEmUSProgress(sessionGot, total, '美股刷新 · 东财 · ' + sessionGot + '/' + total);
+        } catch (e0p) {}
         for (var p = 2; p <= pages; p += CONC) {
           if (Date.now() > deadline) break;
           if (typeof emUSCancelled === 'function' && emUSCancelled()) break;
           var batch = [];
           for (var k = 0; k < CONC && p + k <= pages; k++) batch.push(p + k);
-          // 每页硬超时，避免 Promise.all 挂死
           await Promise.all(batch.map(function (pn) {
             return Promise.race([
               fetchEMUSPage(pn, pageSize).then(function (data) {
-                if (data && data.data) ingestDiff(data.data.diff);
+                if (data && data.data) {
+                  var nAdd = ingestDiff(data.data.diff);
+                  if (nAdd) sessionGot += nAdd;
+                }
               }).catch(function () {}),
               new Promise(function (r) { setTimeout(r, 9000); })
             ]);
           }));
           if (emUSCancelled()) break;
           try {
-            var got = Object.keys(window.__emUSMap || {}).length;
             var pageDone = Math.min(p + CONC - 1, pages);
-            reportEmUSProgress(pageDone, pages, '美股刷新 · 东财 · ' + got + '/' + total + '…');
+            reportEmUSProgress(sessionGot, total, '美股刷新 · 东财 · ' + sessionGot + '/' + total);
             if (emUSCancelled()) break;
-            // 已取消不再叠 toast
-            if (got <= lastGot) stagnant++;
+            if (sessionGot <= lastSessionGot) stagnant++;
             else stagnant = 0;
-            lastGot = got;
+            lastSessionGot = sessionGot;
             // 连续多批有效数不涨且已过半页 → 提前收尾
             if (stagnant >= 8 && pageDone > pages * 0.5) break;
           } catch (eP) {}
