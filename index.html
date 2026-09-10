@@ -11353,7 +11353,48 @@ async function probeSymbolForTV(fullSym) {
       return true;
     }
 
-function mountFullTVIframe(rawSym, myTok) {
+function tvIsWeekdayInTZ(tz) {
+      try {
+        var wd = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(new Date());
+        return wd !== 'Sat' && wd !== 'Sun';
+      } catch (e) {
+        var d = new Date().getDay();
+        return d >= 1 && d <= 5;
+      }
+    }
+    function tvHMInTZ(tz) {
+      var h = 0, m = 0;
+      try {
+        var parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false
+        }).formatToParts(new Date());
+        parts.forEach(function (p) {
+          if (p.type === 'hour') h = parseInt(p.value, 10) % 24;
+          if (p.type === 'minute') m = parseInt(p.value, 10);
+        });
+      } catch (e) {}
+      return h * 60 + m;
+    }
+    /** 完整图默认周期：开盘中 → 1m，未开盘/收盘/周末 → D；美股+A股 */
+    function getTVSessionInterval(rawSym) {
+      var raw = String(rawSym || '');
+      var isCN = /^SSE:|^SZSE:|^BSE:/.test(raw) || /^\d{6}/.test(raw.replace(/^(SSE|SZSE|BSE):/i, ''));
+      if (isCN) {
+        if (!tvIsWeekdayInTZ('Asia/Shanghai')) return 'D';
+        var mins = tvHMInTZ('Asia/Shanghai');
+        // 9:30–11:30、13:00–15:00
+        var am = mins >= 9 * 60 + 30 && mins < 11 * 60 + 30;
+        var pm = mins >= 13 * 60 && mins < 15 * 60;
+        return (am || pm) ? '1' : 'D';
+      }
+      // 美股常规交易时段：美东 9:30–16:00（不含盘前盘后）
+      if (!tvIsWeekdayInTZ('America/New_York')) return 'D';
+      var um = tvHMInTZ('America/New_York');
+      if (um >= 9 * 60 + 30 && um < 16 * 60) return '1';
+      return 'D';
+    }
+
+    function mountFullTVIframe(rawSym, myTok) {
       const wrap = document.getElementById('tvChart');
       if (!wrap) return;
       if (myTok !== window.__chartLoadTok) return;
@@ -11362,10 +11403,12 @@ function mountFullTVIframe(rawSym, myTok) {
       const isCN = /^SSE:|^SZSE:|^BSE:/.test(raw);
       const tz = isCN ? 'Asia%2FShanghai' : 'America%2FNew_York';
       const fid = 'tv_' + myTok + '_' + Date.now();
+      const interval = (typeof getTVSessionInterval === 'function')
+        ? getTVSessionInterval(raw) : 'D';
       const src = 'https://s.tradingview.com/widgetembed/?' +
         'frameElementId=' + fid +
         '&symbol=' + sym +
-        '&interval=D&theme=dark&style=1&timezone=' + tz +
+        '&interval=' + interval + '&theme=dark&style=1&timezone=' + tz +
         '&locale=en&withdateranges=0&hideideas=1&symboledit=0&saveimage=0' +
         '&hidesidetoolbar=1&hidetoptoolbar=0&hidevolume=0&toolbarbg=0d1117';
       wrap.innerHTML = '<iframe id="' + fid + '" src="' + src +
@@ -11375,9 +11418,12 @@ function mountFullTVIframe(rawSym, myTok) {
         if (window.__tvExchTimer) clearTimeout(window.__tvExchTimer);
         hideTVExchOverlay();
       } catch (eOv) {}
+      try {
+        console.log('[TV interval]', raw, interval === '1' ? '1m(开盘中)' : 'D(未开盘/收盘)');
+      } catch (eL) {}
     }
 
-    async function loadFullTVChart(symbol) {
+async function loadFullTVChart(symbol) {
       const wrap = document.getElementById('tvChart');
       if (!wrap) return;
       try {
