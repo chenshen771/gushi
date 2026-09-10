@@ -13392,9 +13392,9 @@ function renderNewsDayRail(dayKeys, opts) {
           ev: ['TSLA','RIVN','LCID','NIO','XPEV','LI','GM','F','RACE','HMC','TM','STLA','VWAGY','BYDDY','XPEV','PSNY'],
           battery: ['QS','ENVX','SLDP','MVST','PLUG','BLDP','BE','FCEL'],
           aero: ['BA','LMT','RTX','GD','NOC','HII','TXT','LHX','GD','SPR','ASTS','RKLB','SPCE','JOBY','ACHR','BA'],
-          robot: ['ROK','EMR','HON','ABB','IR','PH','ETN','AME','ROK','ISRG','CGNX','AI','PATH'],
+          robot: ['ROK','EMR','HON','IR','PH','ETN','AME','ROK','ISRG','CGNX','AI','PATH'],
           logistics: ['UPS','FDX','DAL','UAL','AAL','LUV','CSX','UNP','NSC','ODFL','XPO','JBHT','CHRW'],
-          oil: ['XOM','CVX','COP','SLB','EOG','PXD','OXY','MPC','VLO','PSX','HAL','BKR','DVN','FANG','HES'],
+          oil: ['XOM','CVX','COP','SLB','EOG','OXY','MPC','VLO','PSX','HAL','BKR','DVN','FANG'],
           solar: ['ENPH','SEDG','FSLR','RUN','CSIQ','JKS','DQ','ARRY','SHLS'],
           metals: ['FCX','SCCO','NEM','GOLD','AEM','WPM','RIO','BHP','VALE','AA','X','CLF','NUE','STLD','MP','LAC','ALB','SQM','LTHM'],
           bank: ['JPM','BAC','WFC','C','GS','MS','USB','PNC','TFC','SCHW','BLK','BX','KKR','APO','HOOD','SOFI','PYPL','V','MA','AXP'],
@@ -13585,6 +13585,11 @@ const FALLBACK_SECTORS = {
         window.__sectorRefreshBusy[mkt] = false;
         window.__sectorProgressByMkt = window.__sectorProgressByMkt || { us: null, cn: null };
         window.__sectorProgressByMkt[mkt] = null;
+        // 打断东财全市场拉取（自动/手动全量都走这里）
+        window.__emUSProgGen = (window.__emUSProgGen || 0) + 1;
+        window.__emUSLoadBusy = false;
+        window.__emUSTempBusy = false;
+        window.__emUSLoadTok = -1;
       } catch (e) {}
       const el = document.getElementById('sectorProgressToast');
       if (el) el.style.display = 'none';
@@ -15071,47 +15076,49 @@ const FALLBACK_SECTORS = {
         } catch (eTok) { window.__emUSLoadTok = 0; }
         function reportEmUSProgress(got, tot, label) {
           try {
-            // 过期批次不得回写进度（防止 90% 被另一趟打回 20%）
+            // 已取消 / 过期批次：禁止回写进度，也禁止把 busy 重新点亮
             if (myProgGen !== window.__emUSProgGen) return;
+            if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
             var t = Math.max(1, tot || 1);
             var g = Math.max(0, got || 0);
             var pct = Math.min(100, Math.round(g / t * 100));
-            // 完整刷新：东财拉表走满主进度 0–95%，最后 5% 留给汇总界面（对齐 A 股一条进度）
             try {
               if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.us && !window.__emUSTempBusy) {
                 pct = Math.min(95, pct);
                 if (g >= t) pct = 95;
               }
             } catch (eCap) {}
-            // 与 A 股同款：分母固定 100，文案「美股刷新 · …」
             var lab = label || ('美股刷新 · ' + pct + '%');
             var busy = window.__sectorRefreshBusy && window.__sectorRefreshBusy.us;
             if (typeof showSectorProgress === 'function' && (busy || isSectorPageActive())) {
-              // 手动刷新时 busy=true 才显示可取消条；否则也尽量走同款进度条
               try {
                 if (!window.__sectorRefreshBusy) window.__sectorRefreshBusy = {};
-                if (!busy && isSectorPageActive() && sectorMarket === 'us') {
-                  // 非 fullRefresh 触发的拉表：临时亮进度，不抢取消令牌
+                // 仅在「本趟仍有效且未取消」时才临时点亮 busy
+                if (!busy && isSectorPageActive() && sectorMarket === 'us' &&
+                    !(typeof emUSCancelled === 'function' && emUSCancelled())) {
                   window.__sectorRefreshBusy.us = true;
                   window.__emUSTempBusy = true;
                 }
               } catch (eB) {}
+              // 若已取消则不要再 show
+              if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
+              if (!(window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) &&
+                  !(typeof isSectorPageActive === 'function' && isSectorPageActive())) return;
               showSectorProgress('us', pct, 100, lab);
             } else if (typeof setSectorToast === 'function') {
+              if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
               setSectorToast(true, lab, 60000, 'us');
             }
           } catch (eR) {}
         }
         function emUSCancelled() {
           try {
-            if (!window.__sectorRefreshBusy || !window.__sectorRefreshBusy.us) {
-              // 非完整刷新路径：不因 busy 取消
-              if (window.__emUSLoadTok && window.__sectorRefreshTok &&
-                  window.__sectorRefreshTok.us !== window.__emUSLoadTok) return true;
-              return false;
-            }
-            return !!(window.__sectorRefreshTok && window.__emUSLoadTok &&
-              window.__sectorRefreshTok.us !== window.__emUSLoadTok);
+            // 进度代数被取消按钮抬高 → 立即停
+            if (myProgGen !== window.__emUSProgGen) return true;
+            // token 被 cancelSectorRefresh 抬高 → 停（自动/手动同一套）
+            if (window.__sectorRefreshTok && window.__emUSLoadTok != null &&
+                window.__sectorRefreshTok.us !== window.__emUSLoadTok) return true;
+            return false;
           } catch (eC) { return false; }
         }
         // 准备阶段：先亮出「共多少只」，再开拉（对齐 A 股「准备 x/y」）
@@ -15189,11 +15196,9 @@ const FALLBACK_SECTORS = {
           try {
             var got = Object.keys(window.__emUSMap || {}).length;
             var pageDone = Math.min(p + CONC - 1, pages);
-            // 进度条分母用「页数」，一定能走到 100%，不再用接口 total（含无报价会卡 89%）
             reportEmUSProgress(pageDone, pages, '美股刷新 · 东财 · ' + got + '/' + total + '…');
-            if (typeof setSectorToast === 'function') {
-              setSectorToast(true, '东财美股 ' + got + ' 只 · ' + pageDone + '/' + pages + '页', 60000, 'us');
-            }
+            if (emUSCancelled()) break;
+            // 已取消不再叠 toast
             if (got <= lastGot) stagnant++;
             else stagnant = 0;
             lastGot = got;
@@ -15566,7 +15571,9 @@ const FALLBACK_SECTORS = {
       LNKD:1, YHOO:1, XLNX:1, ALXN:1, VAR:1, WORK:1, MRO:1, COUP:1, PLAN:1,
       MGNI:1, QDEL:1, HZNP:1, BLL:1, FB:1, ANSS:1, NOVA:1, GOEV:1, FREY:1,
       // 图中长期「加载中 / --」用户指定清理，不再拉取展示
-      MAXN:1, EXAS:1, CYBR:1, AVB:1, EQR:1, FYBR:1, DSAC:1, MBNKO:1, EA:1
+      MAXN:1, EXAS:1, CYBR:1, AVB:1, EQR:1, FYBR:1, DSAC:1, MBNKO:1, EA:1,
+      // 板块三级长期「-- --」：退市/无行情
+      ABB:1, PXD:1, HES:1
     };
     function isUSDeadSymbol(code) {
       var sym = String(code || '').toUpperCase().replace(/^US:/, '').split(':').pop();
@@ -15682,6 +15689,7 @@ function classifyEmUSIntoSectors() {
       Object.keys(map).forEach(function (code) {
         var q = map[code];
         if (!q || !(q.c > 0)) return;
+        if (typeof isUSDeadSymbol === 'function' && isUSDeadSymbol(code)) return;
         if (typeof isEmUSJunkSymbol === 'function' && isEmUSJunkSymbol(code, q)) return;
         var sym = String(code || '').toUpperCase().trim();
         if (!sym || inTree[sym]) return;
