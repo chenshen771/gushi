@@ -13246,7 +13246,7 @@ function renderNewsDayRail(dayKeys, opts) {
         children: [
           { id: 'platform', name: '互联网平台', stocks: ['META','GOOGL','GOOG','AMZN','NFLX','SHOP','UBER','BKNG','ABNB','SNAP','PINS','RDDT','SPOT','ETSY','EBAY','MELI','SE','CPNG'] },
           { id: 'china_net', name: '中概互联网', stocks: ['BABA','PDD','JD','BIDU','TME','BILI','NTES','VIPS','IQ','WB','ATHM','TAL','EDU','BZ','YMM','LI','NIO','XPEV'] },
-          { id: 'telecom', name: '电信与5G', stocks: ['T','VZ','TMUS','QCOM','ERIC','NOK','CSCO','CCI','AMT','SBAC','VOD','CHTR','CMCSA'] },
+          { id: 'telecom', name: '电信与5G', stocks: ['T','VZ','TMUS','QCOM','ERIC','NOK','CSCO','CCI','AMT','SBAC','VOD','TEF','CHTR','CMCSA'] },
           { id: 'media', name: '流媒体与数字娱乐', stocks: ['NFLX','DIS','WBD','PARA','SPOT','ROKU','TTWO','RBLX','U','SONY','LYV'] }
         ]
       },
@@ -13388,7 +13388,7 @@ function renderNewsDayRail(dayKeys, opts) {
           eda: ['ASML','AMAT','LRCX','KLAC','SNPS','CDNS','TER','ENTG','ACLS','ONTO','CAMT','VECO'],
           platform: ['META','GOOGL','GOOG','AMZN','NFLX','SHOP','UBER','BKNG','ABNB','SNAP','PINS','RDDT','SPOT','ETSY','EBAY','MELI','SE','CPNG','RBLX','TTWO'],
           china_net: ['BABA','PDD','JD','BIDU','TME','BILI','NTES','VIPS','IQ','WB','ATHM','TAL','EDU','BZ','YMM','LI','NIO','XPEV','BEKE','HTHT'],
-          telecom: ['T','VZ','TMUS','QCOM','ERIC','NOK','CSCO','CCI','AMT','SBAC','VOD','CHTR','CMCSA','LUMN'],
+          telecom: ['T','VZ','TMUS','QCOM','ERIC','NOK','CSCO','CCI','AMT','SBAC','VOD','TEF','CHTR','CMCSA','LUMN'],
           ev: ['TSLA','RIVN','LCID','NIO','XPEV','LI','GM','F','RACE','HMC','TM','STLA','VWAGY','BYDDY','XPEV','PSNY'],
           battery: ['QS','ENVX','SLDP','MVST','PLUG','BLDP','BE','FCEL'],
           aero: ['BA','LMT','RTX','GD','NOC','HII','TXT','LHX','GD','SPR','ASTS','RKLB','SPCE','JOBY','ACHR','BA'],
@@ -15573,7 +15573,7 @@ const FALLBACK_SECTORS = {
       // 图中长期「加载中 / --」用户指定清理，不再拉取展示
       MAXN:1, EXAS:1, CYBR:1, AVB:1, EQR:1, FYBR:1, DSAC:1, MBNKO:1, EA:1,
       // 板块三级长期「-- --」：退市/无行情
-      ABB:1, PXD:1, HES:1, TEF:1
+      ABB:1, PXD:1, HES:1
     };
     function isUSDeadSymbol(code) {
       var sym = String(code || '').toUpperCase().replace(/^US:/, '').split(':').pop();
