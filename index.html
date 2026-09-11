@@ -14767,13 +14767,15 @@ const FALLBACK_SECTORS = {
         var day = sectorLocalDayStr();
         var at = Date.now();
         // 字段尽量短，降低 D1/Worker 体积限制导致整包失败
+        // 整包体积敏感：只留角标/列表必需字段
         var slim = {};
         keys.forEach(function (k) {
           var q = map[k];
           if (!q || !(q.c > 0)) return;
           slim[k] = {
-            c: q.c, d: q.d, dp: q.dp, h: q.h, l: q.l, o: q.o, pc: q.pc,
-            name: q.name || ''
+            c: q.c, dp: q.dp, d: q.d,
+            name: q.name || '',
+            industry: q.industry || ''
           };
         });
         var allKeys = Object.keys(slim);
@@ -14792,47 +14794,22 @@ const FALLBACK_SECTORS = {
           }));
         } catch (eLoc) {}
 
-        // 分片写入报价（每片约 2500 只），避免单 key 过大写失败
-        var CHUNK = 2500;
-        var chunkN = Math.ceil(n / CHUNK) || 1;
-        var chunkOk = 0;
-        for (var ci = 0; ci < chunkN; ci++) {
-          var part = {};
-          var slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
-          for (var si = 0; si < slice.length; si++) {
-            part[slice[si]] = slim[slice[si]];
-          }
-          var okC = await cloudCacheSet('sector:us:quotes:' + ci, {
-            day: day, at: at, total: n, chunk: ci, chunks: chunkN,
-            map: part, source: reason || 'persist'
-          }, 2);
-          if (okC) chunkOk++;
-        }
-        // 索引：打开时按 chunks 拼回；并写一份精简总表兼容旧 Cron
-        var rIdx = await cloudCacheSet('sector:us:quotes', {
-          day: day, at: at, total: n, chunks: chunkN, source: reason || 'persist', chunked: true
-        }, 2);
-        // universe 也分片（同内容，key 不同给 hydrate 兼容）
-        var uniOk = 0;
-        for (var ui = 0; ui < chunkN; ui++) {
-          var partU = {};
-          var sliceU = allKeys.slice(ui * CHUNK, (ui + 1) * CHUNK);
-          for (var uj = 0; uj < sliceU.length; uj++) {
-            partU[sliceU[uj]] = slim[sliceU[uj]];
-          }
-          var okU = await cloudCacheSet('sector:em_us_universe:' + ui, {
-            day: day, at: at, total: n, chunk: ui, chunks: chunkN, map: partU
-          }, 2);
-          if (okU) uniOk++;
-        }
-        await cloudCacheSet('sector:em_us_universe', {
-          day: day, at: at, total: n, chunks: chunkN, chunked: true, source: reason || 'persist'
+        // 整包写入（不再分片）：单 key 带完整 map
+        // 字段已 slim，尽量压体积以过 Worker/D1 限制
+        var payloadQuotes = {
+          day: day, at: at, total: n, chunked: false,
+          map: slim, source: reason || 'persist'
+        };
+        var rIdx = await cloudCacheSet('sector:us:quotes', payloadQuotes, 2);
+        var rUni = await cloudCacheSet('sector:em_us_universe', {
+          day: day, at: at, total: n, chunked: false,
+          map: slim, source: reason || 'persist'
         }, 2);
 
         var payloadMeta = {
           day: day, at: at, usCount: n, usTotal: n,
           source: reason || 'persist',
-          chunks: chunkN, chunkOk: chunkOk,
+          chunked: false,
           emByL1: (function () {
             var o = {}, src = window.__usEmByL1 || {};
             Object.keys(src).forEach(function (id) { o[id] = (src[id] || []).length; });
@@ -14841,8 +14818,8 @@ const FALLBACK_SECTORS = {
         };
         var r3 = await cloudCacheSet('sector:daily:meta', payloadMeta, 3);
         var r4 = await cloudCacheSet('sector:us:em_class', classPayload, 2);
-        console.log('[persistSectorCloudFull]', reason, n, 'chunks', chunkN, 'ok', chunkOk, rIdx, r3, r4);
-        return { ok: chunkOk > 0, n: n, chunkOk: chunkOk, chunks: chunkN, r3: r3, r4: r4 };
+        console.log('[persistSectorCloudFull]', reason, n, 'whole', rIdx, rUni, r3, r4);
+        return { ok: !!(rIdx || rUni), n: n, rIdx: rIdx, rUni: rUni, r3: r3, r4: r4 };
       } catch (e) {
         console.warn('persistSectorCloudFull', e);
         return { ok: false, error: String(e) };
@@ -15882,18 +15859,22 @@ function classifyEmUSIntoSectors() {
           setSectorToast(true, force ? '刷新美股大类…' : '加载美股大类…', 8000, 'us');
         }
       } catch (e) {}
-      // 东财全市场先预热（有缓存则秒过），板块涨跌不再依赖 Finnhub 逐只
+      // 打开先读库整包全量，角标一次尽量完整
       try {
-        if (!emUSMapFresh()) {
+        var mapN0 = Object.keys(window.__emUSMap || {}).length;
+        if (mapN0 < 3000 || force) {
+          await hydrateSectorFromCloud();
+          mapN0 = Object.keys(window.__emUSMap || {}).length;
+        }
+        if (force || mapN0 < 500) {
+          await loadEMUSUniverse(!!force);
+        } else if (!emUSMapFresh()) {
           await loadEMUSUniverse(false);
-        } else if (force && !(window.__emUSMap && Object.keys(window.__emUSMap).length > 3000)) {
-          await loadEMUSUniverse(true);
         }
       } catch (eEm0) {}
-      // 先立刻画出结构（不阻塞），再补涨跌
       window.__usL1PrevCards = window.__usL1PrevCards || {};
       try {
-        if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
+        if (Object.keys(window.__emUSMap || {}).length >= 50 && typeof classifyEmUSIntoSectors === 'function') {
           classifyEmUSIntoSectors();
         }
       } catch (eClL1) {}
