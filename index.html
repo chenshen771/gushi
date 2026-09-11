@@ -15859,22 +15859,18 @@ function classifyEmUSIntoSectors() {
           setSectorToast(true, force ? '刷新美股大类…' : '加载美股大类…', 8000, 'us');
         }
       } catch (e) {}
-      // 打开先读库整包全量，角标一次尽量完整
+      // 东财全市场先预热（有缓存则秒过），板块涨跌不再依赖 Finnhub 逐只
       try {
-        var mapN0 = Object.keys(window.__emUSMap || {}).length;
-        if (mapN0 < 3000 || force) {
-          await hydrateSectorFromCloud();
-          mapN0 = Object.keys(window.__emUSMap || {}).length;
-        }
-        if (force || mapN0 < 500) {
-          await loadEMUSUniverse(!!force);
-        } else if (!emUSMapFresh()) {
+        if (!emUSMapFresh()) {
           await loadEMUSUniverse(false);
+        } else if (force && !(window.__emUSMap && Object.keys(window.__emUSMap).length > 3000)) {
+          await loadEMUSUniverse(true);
         }
       } catch (eEm0) {}
+      // 先立刻画出结构（不阻塞），再补涨跌
       window.__usL1PrevCards = window.__usL1PrevCards || {};
       try {
-        if (Object.keys(window.__emUSMap || {}).length >= 50 && typeof classifyEmUSIntoSectors === 'function') {
+        if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
           classifyEmUSIntoSectors();
         }
       } catch (eClL1) {}
