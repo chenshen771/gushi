@@ -754,7 +754,7 @@ async function runSectorDailyJob(env) {
       pn +
       '&pz=' +
       pageSize +
-      '&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:105,m:106,m:107&fields=f12,f14,f2,f3,f4,f15,f16,f17,f18&_=' +
+      '&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:105,m:106,m:107&fields=f12,f14,f2,f3,f4,f15,f16,f17,f18,f100&_=' +
       Date.now();
     let data = null;
     try {
@@ -784,6 +784,8 @@ async function runSectorDailyJob(env) {
       const d = Number(it.f4);
       const pc =
         !isNaN(dp) && dp !== -100 ? c / (1 + dp / 100) : Number(it.f18) > 0 ? Number(it.f18) : c;
+      let ind = String(it.f100 || '').trim();
+      if (ind === '-' || ind === '—' || ind === 'null') ind = '';
       usMap[code] = {
         c: c,
         dp: isNaN(dp) ? 0 : dp,
@@ -793,6 +795,7 @@ async function runSectorDailyJob(env) {
         o: Number(it.f17) > 0 ? Number(it.f17) : c,
         pc: pc > 0 ? pc : c,
         name: String(it.f14 || ''),
+        industry: ind,
       };
     }
     // 已收齐
@@ -800,11 +803,33 @@ async function runSectorDailyJob(env) {
     if (rows.length < pageSize) break;
   }
   const usCount = Object.keys(usMap).length;
+  // 分片写入（整包会超 D1/Worker 限制失败，网页打开就只剩树内小数）
+  const allKeys = Object.keys(usMap);
+  const CHUNK = 2500;
+  const chunkN = Math.ceil(allKeys.length / CHUNK) || 1;
+  const atNow = Date.now();
+  // 索引：不带大 map，只记分片数
   await putCache(
     'sector:us:quotes',
-    { day: day, at: Date.now(), total: usTotal || usCount, map: usMap },
+    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
     2
   );
+  // 兼容网页 hydrate 的另一 key
+  await putCache(
+    'sector:em_us_universe',
+    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
+    2
+  );
+  for (let ci = 0; ci < chunkN; ci++) {
+    const part = {};
+    const slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
+    for (let si = 0; si < slice.length; si++) {
+      part[slice[si]] = usMap[slice[si]];
+    }
+    const piece = { day: day, at: atNow, map: part, chunk: ci, chunks: chunkN };
+    await putCache('sector:us:quotes:' + ci, piece, 2);
+    await putCache('sector:em_us_universe:' + ci, piece, 2);
+  }
 
   // ---- A股：行业涨跌榜（上+下）----
   async function fetchCnBoardList(up) {
