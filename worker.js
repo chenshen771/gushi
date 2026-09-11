@@ -735,7 +735,7 @@ async function runSectorDailyJob(env) {
     const now = new Date().toISOString();
     const expires = new Date(Date.now() + (ttlDays || 2) * 86400000).toISOString();
     const value = JSON.stringify(data);
-    if (value.length > 1800000) throw new Error('payload too large: ' + key + ' ' + value.length);
+    if (value.length > 900000) throw new Error('payload too large: ' + key + ' ' + value.length);
     await env.DB.prepare(
       'INSERT INTO cache_kv (key, value, updated_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, expires_at=excluded.expires_at'
     )
@@ -803,30 +803,33 @@ async function runSectorDailyJob(env) {
     if (rows.length < pageSize) break;
   }
   const usCount = Object.keys(usMap).length;
-  // 整包写入（不再分片）：精简字段压体积
+  // 分片写入（整包会超 D1/Worker 限制失败，网页打开就只剩树内小数）
+  const allKeys = Object.keys(usMap);
+  const CHUNK = 2500;
+  const chunkN = Math.ceil(allKeys.length / CHUNK) || 1;
   const atNow = Date.now();
-  const slim = {};
-  Object.keys(usMap).forEach(function (code) {
-    const q = usMap[code];
-    if (!q || !(q.c > 0)) return;
-    slim[code] = {
-      c: q.c,
-      dp: q.dp,
-      d: q.d,
-      name: q.name || '',
-      industry: q.industry || '',
-    };
-  });
-  const whole = {
-    day: day,
-    at: atNow,
-    total: usTotal || usCount,
-    chunked: false,
-    map: slim,
-    source: 'cron',
-  };
-  await putCache('sector:us:quotes', whole, 2);
-  await putCache('sector:em_us_universe', whole, 2);
+  // 索引：不带大 map，只记分片数
+  await putCache(
+    'sector:us:quotes',
+    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
+    2
+  );
+  // 兼容网页 hydrate 的另一 key
+  await putCache(
+    'sector:em_us_universe',
+    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
+    2
+  );
+  for (let ci = 0; ci < chunkN; ci++) {
+    const part = {};
+    const slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
+    for (let si = 0; si < slice.length; si++) {
+      part[slice[si]] = usMap[slice[si]];
+    }
+    const piece = { day: day, at: atNow, map: part, chunk: ci, chunks: chunkN };
+    await putCache('sector:us:quotes:' + ci, piece, 2);
+    await putCache('sector:em_us_universe:' + ci, piece, 2);
+  }
 
   // ---- A股：行业涨跌榜（上+下）----
   async function fetchCnBoardList(up) {
