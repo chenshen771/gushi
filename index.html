@@ -14473,13 +14473,33 @@ const FALLBACK_SECTORS = {
           (m === 'cn' ? 'A股' : '美股') + '板块...</div>';
       }
       if (m === 'us') {
-        // 立刻画出美股大类骨架，不等异步，避免闪回 A 股结构
-        try {
-          if (typeof renderUSSectorL1 === 'function') {
-            renderUSSectorL1(false);
-            return;
-          }
-        } catch (e) {}
+        // 先等 D1 灌完再画，避免先出树内小角标再跳成完整数
+        (async function () {
+          try {
+            if (typeof hydrateSectorFromCloud === 'function') {
+              await hydrateSectorFromCloud();
+              try { window.__sectorCloudHydratedOnce = true; } catch (e0) {}
+              try { window.__sectorNewDayForcePaint = true; } catch (e1) {}
+            }
+          } catch (eH) {}
+          try {
+            if (typeof renderUSSectorL1 === 'function') await renderUSSectorL1(false);
+          } catch (eR) {}
+          // D1 归类不完整：自动全量一次，写回库后角标才完整（避免一直停在小角标）
+          try {
+            if (typeof usEmClassIsRich === 'function' && !usEmClassIsRich() && !window.__usOpenFullOnce) {
+              window.__usOpenFullOnce = true;
+              setTimeout(function () {
+                try {
+                  if (sectorMarket !== 'us') return;
+                  if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) return;
+                  if (typeof fullRefreshSectors === 'function') fullRefreshSectors();
+                } catch (eFR) {}
+              }, 300);
+            }
+          } catch (eAuto) {}
+        })();
+        return;
       }
       // 有缓存的 A 股一级：先秒开再后台刷新（仍校验当前市场）
       if (m === 'cn' && window.__cnL1HtmlCache && container) {
@@ -14673,16 +14693,9 @@ const FALLBACK_SECTORS = {
 
         if (ok) {
           try {
-            // 已有 Cron/D1 的归类（sector:us:em_class）且够全 → 绝不用缺 name/industry 的 map 重算冲掉，
-            // 否则角标会从「全量级」掉成「树内硬编码+少量可归类」
-            var cloudClassN = 0;
-            try {
-              var _bl2 = window.__usEmByL2 || {};
-              Object.keys(_bl2).forEach(function (k) { cloudClassN += (_bl2[k] && _bl2[k].length) || 0; });
-            } catch (eCn) {}
-            if (cloudClassN < 400 && typeof classifyEmUSIntoSectors === 'function') {
-              classifyEmUSIntoSectors();
-            }
+            // 只用 D1 已有归类。绝不在 hydrate 阶段用可能缺 name/industry 的行情表重算，
+            // 否则一打开角标偏小，全量刷新后才变完整。
+            // 归类不够全时留给 fullRefresh / render 在拿到完整东财表后再 classify。
           } catch (eCls) {}
           try { if (typeof saveQuoteCacheToDisk === 'function') saveQuoteCacheToDisk(); } catch (e2) {}
         }
@@ -15321,14 +15334,26 @@ const FALLBACK_SECTORS = {
             await loadCNSectors();
           }
         } else {
-          // 美股：打开时先灌 D1（关网页 Cron/上次刷新写入的东财全表），无网也能出涨跌
+          // 美股：打开先等 D1 完整行情+归类，再往下画（不用本地）
           try {
-            if (!window.__sectorCloudHydratedOnce) {
-              window.__sectorCloudHydratedOnce = true;
+            var mapN = Object.keys(window.__emUSMap || {}).length;
+            var rich = (typeof usEmClassIsRich === 'function') ? usEmClassIsRich() : false;
+            if (!window.__sectorCloudHydratedOnce || !rich || mapN < 3000) {
               var hydOk = await hydrateSectorFromCloud();
+              window.__sectorCloudHydratedOnce = true;
               if (hydOk) {
                 try { window.__sectorNewDayForcePaint = true; } catch (eFp) {}
               }
+            }
+            if (typeof usEmClassIsRich === 'function' && !usEmClassIsRich() && !window.__usOpenFullOnce) {
+              window.__usOpenFullOnce = true;
+              setTimeout(function () {
+                try {
+                  if (sectorMarket !== 'us') return;
+                  if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) return;
+                  if (typeof fullRefreshSectors === 'function') fullRefreshSectors();
+                } catch (eFR) {}
+              }, 300);
             }
           } catch (eHyd) {}
           // 美股：全量刷新进行中时不要并行再刷，避免两套数字来回跳
@@ -15872,9 +15897,22 @@ const FALLBACK_SECTORS = {
       // 先立刻画出结构（不阻塞），再补涨跌
       window.__usL1PrevCards = window.__usL1PrevCards || {};
       try {
-        // force（全量刷新后）或云端归类不够全时才重算；否则保留 Cron 归类，角标与图2一致
+        // 仅手动/全量 force，或「归类不够全且行情表带 industry（东财全表）」时才重算。
+        // 禁止用缺 industry 的残表重算，避免一打开小角标、刷新后才变大。
         if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
-          if (force || !usEmClassIsRich()) classifyEmUSIntoSectors();
+          var mapN = Object.keys(window.__emUSMap).length;
+          var withInd = 0;
+          try {
+            var _ks = Object.keys(window.__emUSMap);
+            for (var _i = 0; _i < _ks.length && _i < 400; _i++) {
+              var _q = window.__emUSMap[_ks[_i]];
+              if (_q && (_q.industry || _q.ind || _q.name)) withInd++;
+            }
+          } catch (eInd) {}
+          var mapLooksFull = mapN >= 3000 && withInd >= 80;
+          if (force || (!usEmClassIsRich() && mapLooksFull)) {
+            classifyEmUSIntoSectors();
+          }
         }
       } catch (eClL1) {}
       // 清掉临时塞进树的「其他」节点，防止渲染成第二张卡片
