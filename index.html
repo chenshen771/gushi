@@ -2659,8 +2659,9 @@
       if (typeof US_SECTOR_TREE === 'undefined') return;
       if (typeof usSectorView !== 'undefined' && usSectorView && usSectorView !== 'l1') return;
       try {
+        // 已有 Cron 完整归类时不要重算，否则角标会掉
         if (Object.keys(window.__emUSMap || {}).length > 200 && typeof classifyEmUSIntoSectors === 'function') {
-          classifyEmUSIntoSectors(); // 每次用当前 __emUSMap 重算，旧归类作废
+          if (!usEmClassIsRich()) classifyEmUSIntoSectors();
         }
       } catch (e0) {}
       const cards = US_SECTOR_TREE.map(function (l1) {
@@ -14574,28 +14575,7 @@ const FALLBACK_SECTORS = {
       try {
         var ok = false;
         var bestN = 0;
-        // 0) 本地全量（上次刷新成功写下的）
-        try {
-          var loc = localStorage.getItem('sector:em_us_local');
-          if (loc) {
-            var lo = JSON.parse(loc);
-            if (lo && lo.map && typeof lo.map === 'object') {
-              var lks = Object.keys(lo.map);
-              if (lks.length > bestN && lks.length >= 50) {
-                window.__emUSMap = window.__emUSMap || {};
-                lks.forEach(function (k) {
-                  var q = lo.map[k];
-                  if (!q || !(q.c > 0)) return;
-                  window.__emUSMap[k] = q;
-                });
-                window.__emUSMapAt = lo.at || Date.now();
-                window.__emUSMapTotal = lo.total || lks.length;
-                bestN = lks.length;
-                ok = true;
-              }
-            }
-          }
-        } catch (eLoc) {}
+        // 美股板块：只用数据库 D1，不用 localStorage
         // 1) D1（支持分片 sector:us:quotes:0..N）
         if (typeof cloudCacheGet === 'function') {
           async function mergeCloudMap(baseKey) {
@@ -14689,23 +14669,18 @@ const FALLBACK_SECTORS = {
             }
           } catch (eCl) {}
         }
-        try {
-          var locC = localStorage.getItem('sector:em_class_local');
-          if (locC) {
-            var lc = JSON.parse(locC);
-            if (lc && lc.byL2 && (!window.__usEmClassifiedAt || (lc.at || 0) >= (window.__usEmClassifiedAt || 0))) {
-              window.__usEmByL1 = lc.byL1 || window.__usEmByL1;
-              window.__usEmByL2 = lc.byL2 || window.__usEmByL2;
-              window.__usEmClassifiedAt = lc.at || Date.now();
-            }
-          }
-        } catch (eLc) {}
+        // 归类也只信 D1 sector:us:em_class，不读 localStorage
+
         if (ok) {
           try {
-            if (!window.__usEmClassifiedAt && typeof classifyEmUSIntoSectors === 'function') {
-              classifyEmUSIntoSectors();
-            } else if (typeof classifyEmUSIntoSectors === 'function' && Object.keys(window.__emUSMap || {}).length > 500) {
-              // 有全表时重算一次，保证角标与 map 一致
+            // 已有 Cron/D1 的归类（sector:us:em_class）且够全 → 绝不用缺 name/industry 的 map 重算冲掉，
+            // 否则角标会从「全量级」掉成「树内硬编码+少量可归类」
+            var cloudClassN = 0;
+            try {
+              var _bl2 = window.__usEmByL2 || {};
+              Object.keys(_bl2).forEach(function (k) { cloudClassN += (_bl2[k] && _bl2[k].length) || 0; });
+            } catch (eCn) {}
+            if (cloudClassN < 400 && typeof classifyEmUSIntoSectors === 'function') {
               classifyEmUSIntoSectors();
             }
           } catch (eCls) {}
@@ -14783,14 +14758,8 @@ const FALLBACK_SECTORS = {
           byL1: window.__usEmByL1 || {},
           byL2: window.__usEmByL2 || {}
         };
-        try {
-          localStorage.setItem('sector:em_class_local', JSON.stringify(classPayload));
-        } catch (e3) {}
-        try {
-          localStorage.setItem('sector:em_us_local', JSON.stringify({
-            day: day, at: at, total: n, map: slim
-          }));
-        } catch (eLoc) {}
+        // 美股板块缓存只写 D1，不写 localStorage
+
 
         // 分片写入报价（每片约 2500 只），避免单 key 过大写失败
         var CHUNK = 2500;
@@ -15679,7 +15648,17 @@ const FALLBACK_SECTORS = {
     }
 
 
-function classifyEmUSIntoSectors() {
+/** Cron/D1 归类是否已经够全（避免用缺 name/industry 的行情重算把角标冲小） */
+    function usEmClassIsRich() {
+      try {
+        var bl2 = window.__usEmByL2 || {};
+        var n = 0;
+        Object.keys(bl2).forEach(function (k) { n += (bl2[k] && bl2[k].length) || 0; });
+        return n >= 400;
+      } catch (e) { return false; }
+    }
+
+    function classifyEmUSIntoSectors() {
       var map = window.__emUSMap || {};
       var inTree = getUSTreeSymbolSet();
       var byL1 = {};
@@ -15893,8 +15872,9 @@ function classifyEmUSIntoSectors() {
       // 先立刻画出结构（不阻塞），再补涨跌
       window.__usL1PrevCards = window.__usL1PrevCards || {};
       try {
+        // force（全量刷新后）或云端归类不够全时才重算；否则保留 Cron 归类，角标与图2一致
         if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
-          classifyEmUSIntoSectors();
+          if (force || !usEmClassIsRich()) classifyEmUSIntoSectors();
         }
       } catch (eClL1) {}
       // 清掉临时塞进树的「其他」节点，防止渲染成第二张卡片
@@ -16018,7 +15998,7 @@ function classifyEmUSIntoSectors() {
       usSectorView = 'l2';
       try {
         if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
-          classifyEmUSIntoSectors();
+          if (force || !usEmClassIsRich()) classifyEmUSIntoSectors();
         }
       } catch (eCl0) {}
       usSectorLoadToken += 1;
@@ -16223,7 +16203,7 @@ function classifyEmUSIntoSectors() {
       // 树内成分 + 东财按二级归入的补充（与二级角标一致）
       try {
         if (Object.keys(window.__emUSMap || {}).length && typeof classifyEmUSIntoSectors === 'function') {
-          classifyEmUSIntoSectors();
+          if (force || !usEmClassIsRich()) classifyEmUSIntoSectors();
         }
       } catch (eCl2) {}
       var symbols = (l2.stocks || []).slice();
