@@ -17220,7 +17220,25 @@ async function fetchCNConceptList(po) {
         });
       } catch (e) {}
       const arr = [...byBoard.values()];
-      if (arr.length) cnBoardCache = arr;
+      // 树内 BK：用成分 meta 的 count/chg 覆盖行业榜粗数，保证一打开与全量刷新一致
+      try {
+        if (window.__cnBoardMeta) {
+          arr.forEach(function (row) {
+            if (!row || !row.board) return;
+            var m = window.__cnBoardMeta[row.board];
+            if (!m) return;
+            if (m.count > 0) row.count = m.count;
+            if (typeof m.chg === 'number' && !isNaN(m.chg)) {
+              row.chg = m.chg;
+              row.hasChg = true;
+            }
+          });
+        }
+      } catch (eSync) {}
+      if (arr.length) {
+        cnBoardCache = arr;
+        try { window.__cnBoardCacheAt = Date.now(); } catch (eAt) {}
+      }
       return arr;
     }
 
