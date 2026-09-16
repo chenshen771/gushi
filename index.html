@@ -1794,7 +1794,34 @@
       background: transparent; border: none; cursor: pointer; padding: 6px 10px;
     }
 
-  </style>
+  
+    /* 板块加载转圈 */
+    .sector-loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: var(--muted);
+      padding: 36px 0 28px;
+      gap: 12px;
+    }
+    .sector-loading-spin {
+      width: 28px;
+      height: 28px;
+      border: 3px solid rgba(255,255,255,0.12);
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: sectorSpin 0.75s linear infinite;
+    }
+    .sector-loading-text {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    @keyframes sectorSpin {
+      to { transform: rotate(360deg); }
+    }
+</style>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -1981,7 +2008,7 @@
       <button id="sectorTabCN" onclick="switchSectorMarket('cn')" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);font-size:0.85rem;cursor:pointer;">A股</button>
     </div>
     <div id="sectorContent">
-      <div style="text-align:center;color:var(--muted);padding:30px 0;">加载板块数据中...</div>
+      <div class="sector-loading" role="status"><div class="sector-loading-spin" aria-hidden="true"></div><div class="sector-loading-text">加载板块数据中…</div></div>
     </div>
     <div class="page-note" id="sectorNote">美股用行业ETF实时涨跌 · A股来自东方财富</div>
   </div>
@@ -15648,7 +15675,7 @@ const FALLBACK_SECTORS = {
       // 已有内容时不整页清空，避免闪「加载中」和 0.00
       const hasContent = container && container.querySelector('.sector-cards, .l1-card, .sector-card');
       if (container && !hasContent) {
-        container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:30px 0;">加载板块数据中...</div>';
+        container.innerHTML = (typeof sectorLoadingHtml === 'function' ? sectorLoadingHtml('加载板块数据中…') : '<div class="sector-loading" role="status"><div class="sector-loading-spin" aria-hidden="true"></div><div class="sector-loading-text">加载板块数据中…</div></div>');
       }
       try {
         if (typeof sectorMarket === 'undefined' || !sectorMarket) sectorMarket = 'us';
@@ -16239,11 +16266,18 @@ const FALLBACK_SECTORS = {
         return;
       }
       if (container) {
-        container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载美股大类...</div>';
+        container.innerHTML = (typeof sectorLoadingHtml === 'function' ? sectorLoadingHtml('加载美股大类…') : '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载美股大类...</div>');
         try { playSectorViewAnim('back'); } catch (eA2) {}
         try { window.__sectorAnimPending = null; } catch (eP3) {}
       }
       if (typeof renderUSSectorL1 === 'function') renderUSSectorL1(true);
+    }
+
+    function sectorLoadingHtml(msg) {
+      msg = msg || '加载中…';
+      return '<div class="sector-loading" role="status" aria-live="polite">' +
+        '<div class="sector-loading-spin" aria-hidden="true"></div>' +
+        '<div class="sector-loading-text">' + msg + '</div></div>';
     }
 
     async function renderUSSectorL1(force) {
@@ -16397,8 +16431,29 @@ const FALLBACK_SECTORS = {
       } catch (eMerge) {}
       var hasUsCards = !!document.querySelector('#sectorContent .l1-card[data-mkt="us"]');
       var anyKnown = baseCards.some(function (c) { return !c._pending; });
+      // 首屏：角标明显偏小且已有完整卡在画面上时，不要用树内小数盖掉
+      try {
+        var sumB = 0;
+        (baseCards || []).forEach(function (c) { sumB += Number(c.count || 0); });
+        if (sumB < 800 && hasUsCards) {
+          var existBadges = container.querySelectorAll('.l1-card[data-mkt="us"] .s-badge');
+          var existSum = 0;
+          existBadges.forEach(function (el) { existSum += parseInt(el.textContent, 10) || 0; });
+          if (existSum > 800) {
+            anyKnown = false; // 跳过本次小角标绘制
+            hasUsCards = true;
+          }
+        }
+      } catch (eSkip) {}
       if (!hasUsCards || anyKnown) {
-        paintUSSectorL1Cards(baseCards);
+        var sumPaint = 0;
+        try { (baseCards || []).forEach(function (c) { sumPaint += Number(c.count || 0); }); } catch (e) {}
+        // 无完整数据时保留「加载中」，不先画 80 这种树内数
+        if (sumPaint < 800 && !hasUsCards) {
+          /* keep loading */
+        } else {
+          paintUSSectorL1Cards(baseCards);
+        }
       }
 
       const cards = await Promise.all(baseCards.map(async function (card) {
@@ -17304,7 +17359,7 @@ async function fetchCNConceptList(po) {
         return;
       }
       if (container) {
-        container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载A股大类...</div>';
+        container.innerHTML = (typeof sectorLoadingHtml === 'function' ? sectorLoadingHtml('加载A股大类…') : '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载A股大类...</div>');
       }
       renderCNSectorL1(true);
     }
@@ -17316,7 +17371,7 @@ async function fetchCNConceptList(po) {
       const myMktTok = sectorMarketToken;
       const keep = container.querySelector('.sector-cards, .l1-card');
       if (!keep) {
-        container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载A股大类...</div>';
+        container.innerHTML = (typeof sectorLoadingHtml === 'function' ? sectorLoadingHtml('加载A股大类…') : '<div style="text-align:center;color:var(--muted);padding:24px 0;">加载A股大类...</div>');
       }
       cnSectorView = 'l1';
       // 打开/切到 A股：先灌本地+D1 上次全量刷新结果，避免重开又是空/旧
