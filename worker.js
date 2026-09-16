@@ -1060,12 +1060,41 @@ async function runSectorDailyJob(env) {
     console.log('classify cron fail', String(eCls));
   }
 
-  // ---- A股：行业涨跌榜（上+下）----
+  // ---- A股：行业榜 + 树内 30 个 BK 成分股（与网页 CN_SECTOR_TREE 对齐）----
+  const CN_BOARD_TREE = [
+    { l1: 'cn_tech', l1Name: '科技与技术', l1En: 'Tech', id: 'elec', name: '电子', board: 'BK1201' },
+    { l1: 'cn_tech', l1Name: '科技与技术', l1En: 'Tech', id: 'computer', name: '计算机', board: 'BK1207' },
+    { l1: 'cn_tech', l1Name: '科技与技术', l1En: 'Tech', id: 'telecom', name: '通信', board: 'BK1215' },
+    { l1: 'cn_tech', l1Name: '科技与技术', l1En: 'Tech', id: 'media', name: '传媒', board: 'BK0486' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'power', name: '电力设备', board: 'BK1200' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'machine', name: '机械设备', board: 'BK1205' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'auto', name: '汽车', board: 'BK1211' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'defense', name: '国防军工', board: 'BK1204' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'build', name: '建筑装饰', board: 'BK1209' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'bmat', name: '建筑材料', board: 'BK1208' },
+    { l1: 'cn_mfg', l1Name: '制造与重工', l1En: 'Manufacturing', id: 'light', name: '轻工制造', board: 'BK1212' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'food', name: '食品饮料', board: 'BK0438' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'pharma', name: '医药生物', board: 'BK1216' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'appliance', name: '家用电器', board: 'BK0456' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'beauty', name: '美容护理', board: 'BK1035' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'retail', name: '商贸零售', board: 'BK1213' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'textile', name: '纺织服饰', board: 'BK0436' },
+    { l1: 'cn_cons', l1Name: '消费与医疗', l1En: 'Consumer & Health', id: 'service', name: '社会服务', board: 'BK1214' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'metal', name: '有色金属', board: 'BK0478' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'coal', name: '煤炭', board: 'BK0437' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'oil', name: '石油石化', board: 'BK0464' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'chem', name: '基础化工', board: 'BK1206' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'steel', name: '钢铁', board: 'BK0479' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'env', name: '环保', board: 'BK0728' },
+    { l1: 'cn_res', l1Name: '基础资源', l1En: 'Resources', id: 'agri', name: '农林牧渔', board: 'BK0433' },
+    { l1: 'cn_fin', l1Name: '金融地产与服务', l1En: 'Financials', id: 'bank', name: '银行', board: 'BK1283' },
+    { l1: 'cn_fin', l1Name: '金融地产与服务', l1En: 'Financials', id: 'nonbank', name: '非银金融', board: 'BK1203' },
+    { l1: 'cn_fin', l1Name: '金融地产与服务', l1En: 'Financials', id: 'property', name: '房地产', board: 'BK1202' },
+    { l1: 'cn_fin', l1Name: '金融地产与服务', l1En: 'Financials', id: 'transport', name: '交通运输', board: 'BK1210' },
+    { l1: 'cn_fin', l1Name: '金融地产与服务', l1En: 'Financials', id: 'utility', name: '公用事业', board: 'BK0427' },
+  ];
+
   async function fetchCnBoardList(up) {
-    const api =
-      'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14,f2,f3,f104,f105&_=' +
-      Date.now();
-    // up: fid=f3 desc is default; for down use fid=f3&po=0
     const url =
       'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=120&po=' +
       (up ? 1 : 0) +
@@ -1089,6 +1118,51 @@ async function runSectorDailyJob(env) {
       return [];
     }
   }
+
+  /** 拉单个 BK 板块成分（最多 5 页 ≈ 500 只，覆盖绝大部分行业） */
+  async function fetchCnBoardMembers(boardCode) {
+    const out = [];
+    const pageSize = 100;
+    const maxPages = 5;
+    for (let pn = 1; pn <= maxPages; pn++) {
+      const url =
+        'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' +
+        pn +
+        '&pz=' +
+        pageSize +
+        '&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' +
+        boardCode +
+        '&fields=f12,f14,f2,f3&_=' +
+        Date.now();
+      let rows = [];
+      try {
+        const r = await fetch(url, { headers });
+        if (!r.ok) break;
+        const data = await r.json();
+        const diff = data && data.data && data.data.diff;
+        rows = Array.isArray(diff) ? diff : [];
+      } catch (e) {
+        break;
+      }
+      if (!rows.length) break;
+      for (let i = 0; i < rows.length; i++) {
+        const it = rows[i] || {};
+        const code = String(it.f12 || '').trim();
+        if (!code) continue;
+        const price = Number(it.f2);
+        const chg = it.f3 != null ? Number(it.f3) : 0;
+        out.push({
+          code: code,
+          name: String(it.f14 || ''),
+          chg: isNaN(chg) ? 0 : chg,
+          price: price > 0 ? price : 0,
+        });
+      }
+      if (rows.length < pageSize) break;
+    }
+    return out;
+  }
+
   const upBoards = await fetchCnBoardList(true);
   const downBoards = await fetchCnBoardList(false);
   const boardMap = {};
@@ -1096,10 +1170,143 @@ async function runSectorDailyJob(env) {
     if (!b.board) return;
     if (!boardMap[b.board]) boardMap[b.board] = b;
   });
+  // 保证树内 30 个 BK 一定有条目
+  CN_BOARD_TREE.forEach(function (node) {
+    if (!boardMap[node.board]) {
+      boardMap[node.board] = {
+        board: node.board,
+        name: node.name,
+        chg: 0,
+        count: 0,
+      };
+    }
+  });
+
+  const cnMeta = {};
+  const cnStocks = {};
+  const cnByL2 = {};
+  // 分批拉成分，避免同时打爆东财（每批 5 个）
+  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 5) {
+    const batch = CN_BOARD_TREE.slice(bi, bi + 5);
+    const results = await Promise.all(
+      batch.map(function (node) {
+        return fetchCnBoardMembers(node.board).then(function (members) {
+          return { node: node, members: members };
+        });
+      })
+    );
+    results.forEach(function (item) {
+      const node = item.node;
+      const members = item.members || [];
+      cnStocks[node.board] = members.slice(0, 400);
+      cnByL2[node.id] = members.map(function (m) {
+        return m.code;
+      });
+      var sum = 0;
+      var n = 0;
+      members.forEach(function (m) {
+        if (m.chg != null && !isNaN(m.chg)) {
+          sum += m.chg;
+          n++;
+        }
+      });
+      const avg = n ? sum / n : boardMap[node.board] ? boardMap[node.board].chg : 0;
+      cnMeta[node.board] = {
+        count: members.length,
+        name: node.name,
+        chg: Math.round(avg * 100) / 100,
+        l2: node.id,
+        l1: node.l1,
+      };
+      // 用成分精确数覆盖行业榜粗数
+      if (boardMap[node.board]) {
+        boardMap[node.board].count = members.length;
+        boardMap[node.board].name = node.name;
+        if (n > 0) boardMap[node.board].chg = Math.round(avg * 100) / 100;
+      }
+    });
+  }
+
   const boards = Object.keys(boardMap).map(function (k) {
     return boardMap[k];
   });
-  await putCache('sector:cn:boards', { day: day, at: Date.now(), boards: boards }, 2);
+
+  // 一级角标：各 L1 下细分成分数合计 + 涨跌简单平均
+  const l1Order = [
+    { id: 'cn_tech', name: '科技与技术', en: 'Tech', subCount: 4 },
+    { id: 'cn_mfg', name: '制造与重工', en: 'Manufacturing', subCount: 7 },
+    { id: 'cn_cons', name: '消费与医疗', en: 'Consumer & Health', subCount: 7 },
+    { id: 'cn_res', name: '基础资源', en: 'Resources', subCount: 7 },
+    { id: 'cn_fin', name: '金融地产与服务', en: 'Financials', subCount: 5 },
+  ];
+  const cnL1Cards = l1Order.map(function (l1) {
+    var count = 0;
+    var sum = 0;
+    var n = 0;
+    CN_BOARD_TREE.forEach(function (node) {
+      if (node.l1 !== l1.id) return;
+      const m = cnMeta[node.board];
+      if (!m) return;
+      count += Number(m.count) || 0;
+      if (m.chg != null && !isNaN(m.chg)) {
+        sum += m.chg;
+        n++;
+      }
+    });
+    return {
+      id: l1.id,
+      name: l1.name,
+      en: l1.en,
+      chg: n ? Math.round((sum / n) * 100) / 100 : 0,
+      count: count,
+      subCount: l1.subCount,
+      _pending: false,
+    };
+  });
+  var cnL1Sum = 0;
+  cnL1Cards.forEach(function (c) {
+    cnL1Sum += c.count;
+  });
+
+  const atCn = Date.now();
+  await putCache(
+    'sector:cn:boards',
+    {
+      day: day,
+      at: atCn,
+      boards: boards,
+      meta: cnMeta,
+      stocks: cnStocks,
+      byL2: cnByL2,
+      source: 'cron',
+    },
+    2
+  );
+  await putCache(
+    'sector:cn:em_class',
+    {
+      day: day,
+      at: atCn,
+      byL2: cnByL2,
+      meta: cnMeta,
+      classN: cnL1Sum,
+      source: 'cron',
+    },
+    2
+  );
+  if (cnL1Sum > 100) {
+    await putCache(
+      'sector:cn:l1_snap',
+      {
+        day: day,
+        at: atCn,
+        cards: cnL1Cards,
+        sum: cnL1Sum,
+        source: 'cron',
+      },
+      3
+    );
+  }
 
   // 状态标记：网页可用来判断「今天是否已后台刷过」
   await putCache(
@@ -1112,6 +1319,8 @@ async function runSectorDailyJob(env) {
       usClassN: classResult.classN || 0,
       usL1Sum: classResult.sum || 0,
       cnBoards: boards.length,
+      cnClassN: cnL1Sum,
+      cnTreeBoards: CN_BOARD_TREE.length,
       ms: Date.now() - started,
       source: 'cron',
     },
@@ -1125,6 +1334,8 @@ async function runSectorDailyJob(env) {
     usClassN: classResult.classN || 0,
     usL1Sum: classResult.sum || 0,
     cnBoards: boards.length,
+    cnClassN: cnL1Sum,
+    cnTreeBoards: CN_BOARD_TREE.length,
     ms: Date.now() - started,
   };
 }
