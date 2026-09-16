@@ -720,6 +720,202 @@ async function handleApi(request, env, url) {
 }
 
 
+
+/** 与网页 classifyOneEmSymbol 对齐：东财全表 → 一级/二级归类 */
+const US_EM_SYMBOL_MAP = {
+      /* 存储 / 内存 */
+      SKHY: { l1: 'tech', l2: 'storage' }, SKH: { l1: 'tech', l2: 'storage' },
+      MU: { l1: 'tech', l2: 'storage' }, WDC: { l1: 'tech', l2: 'storage' }, STX: { l1: 'tech', l2: 'storage' },
+      SNDK: { l1: 'tech', l2: 'storage' }, NTAP: { l1: 'tech', l2: 'storage' }, PSTG: { l1: 'tech', l2: 'storage' },
+      /* 半导体 */
+      CBRS: { l1: 'tech', l2: 'semi' }, NVDA: { l1: 'tech', l2: 'semi' }, AMD: { l1: 'tech', l2: 'semi' },
+      TSM: { l1: 'tech', l2: 'semi' }, AVGO: { l1: 'tech', l2: 'semi' }, ASML: { l1: 'tech', l2: 'semi' },
+      INTC: { l1: 'tech', l2: 'semi' }, QCOM: { l1: 'tech', l2: 'semi' }, ARM: { l1: 'tech', l2: 'semi' },
+      ALAB: { l1: 'tech', l2: 'semi' }, CRDO: { l1: 'tech', l2: 'semi' }, AAOI: { l1: 'tech', l2: 'optical' },
+      /* 算力服务器 */
+      SMCI: { l1: 'tech', l2: 'datacenter' },
+      /* 电力 / 能源设备 */
+      PSIX: { l1: 'energy', l2: 'energy_eq' }, NMAD: { l1: 'energy', l2: 'energy_eq' },
+      /* 医疗 */
+      BNR: { l1: 'health', l2: 'biotech' }, HSCS: { l1: 'health', l2: 'device' },
+      TYRA: { l1: 'health', l2: 'biotech' }, AIRS: { l1: 'health', l2: 'device' },
+      /* 物流航运 */
+      FWRD: { l1: 'mfg', l2: 'logistics' }, EDRY: { l1: 'mfg', l2: 'logistics' }, CMDB: { l1: 'mfg', l2: 'logistics' },
+      /* 消费 */
+      RDI: { l1: 'consumer', l2: 'discretionary' },
+      /* 航天 */
+      ASTS: { l1: 'mfg', l2: 'defense' }, RKLB: { l1: 'mfg', l2: 'defense' }, LUNR: { l1: 'mfg', l2: 'defense' }
+    };
+
+const US_EM_L2_RULES = [
+      { l1: 'tech', l2: 'semi', kw: /\b(nvda|tsm|amd|intc|qcom|arm|mrcy|on\b|swks|mpwr)\b/i },
+      { l1: 'tech', l2: 'software', kw: /\b(microsoft|oracle|salesforce|adobe|servicenow|snowflake|intuit|datadog|mongodb|hubspot)\b/i },
+      { l1: 'fin', l2: 'bank', kw: /\b(jpmorgan|bank of america|wells fargo|citigroup|goldman|morgan stanley)\b|摩根|高盛|花旗/i },
+      { l1: 'health', l2: 'biotech', kw: /\b(pfizer|moderna|amgen|gilead|regeneron|vertex|biogen)\b|辉瑞|生物制药/i },
+      { l1: 'energy', l2: 'oil', kw: /\b(exxon|chevron|conocophillips|schlumberger|halliburton)\b|埃克森|雪佛龙/i },
+      { l1: 'consumer', l2: 'retail', kw: /\b(walmart|costco|target|home depot|nike|starbucks|mcdonald)\b|沃尔玛|耐克|星巴克/i },
+      
+      { l1: 'tech', l2: 'storage', kw: /\b(memory|dram|nand|ssd|hdd|storage|flash|hynix|micron|seagate)\b|western digital|存储|内存|闪存|硬盘|海力士/i },
+      { l1: 'tech', l2: 'semi', kw: /\b(semiconductor|chipmaker|foundry|wafer|gpu|fpga|asic|lithography|cerebras)\b|\bsemi\b|芯片|半导体|晶圆/i },
+      { l1: 'tech', l2: 'software', kw: /\b(software|saas|cloud computing|cloud software)\b|软件|云计算(?!安全)/i },
+      { l1: 'tech', l2: 'cyber', kw: /\b(cybersecurity|cyber security|information security)\b|网络安全|信息安全/i },
+      { l1: 'tech', l2: 'hardware', kw: /\b(server|laptop|pc hardware|computer hardware)\b|服务器|硬件设备/i },
+      { l1: 'tech', l2: 'optical', kw: /\b(optical module|photonics|transceiver|光模块|光通信)\b/i },
+      { l1: 'tech', l2: 'datacenter', kw: /\b(datacenter|data center|data-centre|数据中心)\b/i },
+      { l1: 'tech', l2: 'eda', kw: /\b(eda|electronic design automation|semiconductor equipment|chip equipment)\b|eda|半导体设备|光刻/i },
+      { l1: 'internet', l2: 'platform', kw: /\b(internet platform|social media|e-?commerce|search engine)\b|互联网平台|电商|社交网络/i },
+      { l1: 'internet', l2: 'telecom', kw: /\b(telecom|telecommunications|5g|6g|wireless carrier)\b|电信|通信运营/i },
+      { l1: 'internet', l2: 'media', kw: /\b(streaming|gaming company|digital media)\b|流媒体|游戏公司|数字传媒/i },
+      { l1: 'mfg', l2: 'ev', kw: /\b(electric vehicle|\bev\b|ev maker)\b|电动车|新能源车/i },
+      { l1: 'mfg', l2: 'battery', kw: /\b(battery|lithium-?ion)\b|锂电池|锂电/i },
+      { l1: 'mfg', l2: 'robot', kw: /\b(robotics|industrial robot|automation equipment)\b|工业机器人|自动化设备/i },
+      { l1: 'mfg', l2: 'defense', kw: /\b(aerospace|defense contractor|defence)\b|军工|航天国防/i },
+      { l1: 'mfg', l2: 'logistics', kw: /\b(logistics|freight|shipping line|airline|rail freight|bulkers)\b|物流|航运|货运|航空运输/i },
+      { l1: 'energy', l2: 'oil', kw: /\b(oil|petroleum|natural gas|upstream)\b|石油|油气|天然气(?!电力)/i },
+      { l1: 'energy', l2: 'solar', kw: /\b(solar|photovoltaic)\b|光伏|太阳能/i },
+      { l1: 'energy', l2: 'energy_eq', kw: /\b(power solutions|power equipment|grid equipment|utility)\b|电力方案|电力设备|电网/i },
+      { l1: 'energy', l2: 'metals', kw: /\b(mining|copper mine|steel producer)\b|有色|矿业|钢铁/i },
+      { l1: 'energy', l2: 'gold', kw: /\b(gold mine|gold mining)\b|金矿|黄金开采/i },
+      { l1: 'fin', l2: 'bank', kw: /\b(bank|banking)\b|银行(?!科技)/i },
+      { l1: 'fin', l2: 'asset', kw: /\b(asset management|broker-?dealer|investment bank)\b|资管|券商/i },
+      { l1: 'fin', l2: 'fintech', kw: /\b(fintech|payment processor|digital payment)\b|金融科技|支付科技/i },
+      { l1: 'health', l2: 'biotech', kw: /\b(biotech|bioscience|therapeutics|oncology)\b|生物科技|生物制药/i },
+      { l1: 'health', l2: 'biopharma', kw: /\b(pharma|pharmaceutical)\b|制药|医药/i },
+      { l1: 'health', l2: 'device', kw: /\b(medical device|medtech|diagnostic device)\b|医疗器械|诊断设备/i },
+      { l1: 'health', l2: 'hcare_svc', kw: /\b(hospital|health services|managed care)\b|医院|医疗服务/i },
+      { l1: 'consumer', l2: 'staples', kw: /\b(food products|beverage|consumer staples)\b|食品|饮料/i },
+      { l1: 'consumer', l2: 'discretionary', kw: /\b(retail|restaurant|apparel|cinema)\b|零售|餐饮|服装/i },
+      { l1: 'consumer', l2: 'reit', kw: /\b(reit|real estate investment)\b|房地产投资/i },
+      { l1: 'consumer', l2: 'luxury', kw: /\b(luxury|hotel|travel services)\b|奢侈|酒店|旅游服务/i }
+    ];
+
+const US_EM_F100_MAP = {
+  '信息技术': { l1: 'tech', l2: 'hardware' },
+  '通讯服务': { l1: 'internet', l2: 'telecom' },
+  '通信服务': { l1: 'internet', l2: 'telecom' },
+  '工业': { l1: 'mfg', l2: 'robot' },
+  '能源': { l1: 'energy', l2: 'oil' },
+  '原材料': { l1: 'energy', l2: 'metals' },
+  '公用事业': { l1: 'energy', l2: 'energy_eq' },
+  '金融': { l1: 'fin', l2: 'fintech' },
+  '房地产': { l1: 'consumer', l2: 'reit' },
+  '医疗保健': { l1: 'health', l2: 'biotech' },
+  '日常消费品': { l1: 'consumer', l2: 'staples' },
+  '非日常生活消费品': { l1: 'consumer', l2: 'discretionary' },
+  '可选消费': { l1: 'consumer', l2: 'discretionary' },
+};
+
+const US_L1_META = [
+  { id: 'tech', name: '科技与电子', en: 'Technology', subCount: 8 },
+  { id: 'internet', name: '互联网与通信', en: 'Internet & Telecom', subCount: 4 },
+  { id: 'mfg', name: '先进制造与工业', en: 'Industrials', subCount: 5 },
+  { id: 'energy', name: '资源与能源', en: 'Energy & Materials', subCount: 5 },
+  { id: 'fin', name: '金融与商业服务', en: 'Financials', subCount: 3 },
+  { id: 'health', name: '医疗与大健康', en: 'Healthcare', subCount: 4 },
+  { id: 'consumer', name: '大消费与地产', en: 'Consumer & RE', subCount: 4 },
+];
+
+function classifyOneEmSymbolWorker(sym, name, industry) {
+  sym = String(sym || '').toUpperCase().trim();
+  var nm = String(name || '');
+  var text = (sym + ' ' + nm).toLowerCase();
+  if (US_EM_SYMBOL_MAP[sym]) return US_EM_SYMBOL_MAP[sym];
+  for (var i = 0; i < US_EM_L2_RULES.length; i++) {
+    var r = US_EM_L2_RULES[i];
+    if (r.kw && r.kw.test(text)) return { l1: r.l1, l2: r.l2 };
+  }
+  var ind = String(industry || '').trim();
+  if (ind && ind !== '-' && ind !== '—') {
+    if (US_EM_F100_MAP[ind]) return US_EM_F100_MAP[ind];
+    if (/信息|软件|电子|半导体/.test(ind)) return { l1: 'tech', l2: 'hardware' };
+    if (/通信|传媒|互联网/.test(ind)) return { l1: 'internet', l2: 'platform' };
+    if (/工业|制造/.test(ind)) return { l1: 'mfg', l2: 'robot' };
+    if (/能源|石油|燃气/.test(ind)) return { l1: 'energy', l2: 'oil' };
+    if (/材料|金属|矿业/.test(ind)) return { l1: 'energy', l2: 'metals' };
+    if (/公用/.test(ind)) return { l1: 'energy', l2: 'energy_eq' };
+    if (/金融|银行|保险/.test(ind)) return { l1: 'fin', l2: 'fintech' };
+    if (/地产|房地产/.test(ind)) return { l1: 'consumer', l2: 'reit' };
+    if (/医疗|保健|制药/.test(ind)) return { l1: 'health', l2: 'biotech' };
+    if (/日常消费/.test(ind)) return { l1: 'consumer', l2: 'staples' };
+    if (/消费/.test(ind)) return { l1: 'consumer', l2: 'discretionary' };
+  }
+  return null;
+}
+
+function isEmUSJunkSymbolWorker(code, q) {
+  var s = String(code || '').toUpperCase();
+  if (!s) return true;
+  // ETF / 杠杆 / 常见指数工具
+  if (/^(SPY|QQQ|IWM|DIA|VOO|VTI|ARKK|TQQQ|SQQQ|UVXY|VXX|SOXL|SOXS|TNA|TZA|UPRO|SPXU)$/.test(s)) return true;
+  if (/^[A-Z]+[0-9]$/.test(s) && s.length <= 5) return true; // 认股权等
+  var nm = String((q && q.name) || '');
+  if (/ETF|ETN|杠杆|反向|信托基金/i.test(nm)) return true;
+  return false;
+}
+
+function classifyUSMapToSectors(usMap) {
+  var byL1 = {};
+  var byL2 = {};
+  var l1Stats = {};
+  Object.keys(usMap).forEach(function (code) {
+    var q = usMap[code];
+    if (!q || !(q.c > 0)) return;
+    if (isEmUSJunkSymbolWorker(code, q)) return;
+    var hit = classifyOneEmSymbolWorker(code, q.name || '', q.industry || '');
+    if (!hit || !hit.l1 || !hit.l2) return;
+    byL1[hit.l1] = byL1[hit.l1] || [];
+    byL1[hit.l1].push(code);
+    byL2[hit.l2] = byL2[hit.l2] || [];
+    byL2[hit.l2].push(code);
+    l1Stats[hit.l1] = l1Stats[hit.l1] || { sum: 0, n: 0 };
+    var dp = Number(q.dp);
+    if (!isNaN(dp)) {
+      l1Stats[hit.l1].sum += dp;
+      l1Stats[hit.l1].n++;
+    }
+  });
+  function dedupe(arr) {
+    var s = {}, out = [];
+    (arr || []).forEach(function (x) {
+      if (!s[x]) {
+        s[x] = true;
+        out.push(x);
+      }
+    });
+    return out;
+  }
+  Object.keys(byL1).forEach(function (id) {
+    byL1[id] = dedupe(byL1[id]);
+  });
+  Object.keys(byL2).forEach(function (id) {
+    byL2[id] = dedupe(byL2[id]);
+  });
+  var classN = 0;
+  Object.keys(byL2).forEach(function (k) {
+    classN += (byL2[k] && byL2[k].length) || 0;
+  });
+  var cards = US_L1_META.map(function (m) {
+    var n = (byL1[m.id] && byL1[m.id].length) || 0;
+    var st = l1Stats[m.id] || { sum: 0, n: 0 };
+    var chg = st.n ? st.sum / st.n : 0;
+    return {
+      id: m.id,
+      name: m.name,
+      en: m.en,
+      chg: Math.round(chg * 100) / 100,
+      count: n,
+      subCount: m.subCount,
+      _pending: false,
+    };
+  });
+  var sum = 0;
+  cards.forEach(function (c) {
+    sum += c.count;
+  });
+  return { byL1: byL1, byL2: byL2, classN: classN, cards: cards, sum: sum };
+}
+
+
 /** 东财美股全表 + A股行业榜 → 写入 D1，供网页打开时秒开板块 */
 async function runSectorDailyJob(env) {
   if (!env.DB) throw new Error('DB not bound');
@@ -831,6 +1027,39 @@ async function runSectorDailyJob(env) {
     await putCache('sector:em_us_universe:' + ci, piece, 2);
   }
 
+  // ---- 美股归类：写入 em_class + 一级角标快照（打开网页可直接完整角标）----
+  var classResult = { byL1: {}, byL2: {}, classN: 0, cards: [], sum: 0 };
+  try {
+    classResult = classifyUSMapToSectors(usMap);
+    await putCache(
+      'sector:us:em_class',
+      {
+        day: day,
+        at: atNow,
+        byL1: classResult.byL1,
+        byL2: classResult.byL2,
+        classN: classResult.classN,
+        source: 'cron',
+      },
+      2
+    );
+    if (classResult.sum > 400 && classResult.cards && classResult.cards.length) {
+      await putCache(
+        'sector:us:l1_snap',
+        {
+          day: day,
+          at: atNow,
+          cards: classResult.cards,
+          sum: classResult.sum,
+          source: 'cron',
+        },
+        3
+      );
+    }
+  } catch (eCls) {
+    console.log('classify cron fail', String(eCls));
+  }
+
   // ---- A股：行业涨跌榜（上+下）----
   async function fetchCnBoardList(up) {
     const api =
@@ -880,8 +1109,11 @@ async function runSectorDailyJob(env) {
       at: Date.now(),
       usCount: usCount,
       usTotal: usTotal || usCount,
+      usClassN: classResult.classN || 0,
+      usL1Sum: classResult.sum || 0,
       cnBoards: boards.length,
       ms: Date.now() - started,
+      source: 'cron',
     },
     3
   );
@@ -890,6 +1122,8 @@ async function runSectorDailyJob(env) {
     day: day,
     usCount: usCount,
     usTotal: usTotal || usCount,
+    usClassN: classResult.classN || 0,
+    usL1Sum: classResult.sum || 0,
     cnBoards: boards.length,
     ms: Date.now() - started,
   };
