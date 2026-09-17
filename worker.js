@@ -127,6 +127,8 @@ export default {
       'datacenter.eastmoney.com',
       'finance.eastmoney.com',
       'finnhub.io',
+      'www.federalreserve.gov',
+      'federalreserve.gov',
     ];
     if (
       !allow.some(
