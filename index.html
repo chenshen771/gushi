@@ -11637,15 +11637,10 @@ function tvIsWeekdayInTZ(tz) {
     function getTVSessionInterval(rawSym) {
       var raw = String(rawSym || '');
       var isCN = /^SSE:|^SZSE:|^BSE:/.test(raw) || /^\d{6}/.test(raw.replace(/^(SSE|SZSE|BSE):/i, ''));
-      if (isCN) {
-        if (!tvIsWeekdayInTZ('Asia/Shanghai')) return 'D';
-        var mins = tvHMInTZ('Asia/Shanghai');
-        // 9:30–11:30、13:00–15:00
-        var am = mins >= 9 * 60 + 30 && mins < 11 * 60 + 30;
-        var pm = mins >= 13 * 60 && mins < 15 * 60;
-        return (am || pm) ? '1' : 'D';
-      }
-      // 美股常规交易时段：美东 9:30–16:00（不含盘前盘后）
+      // A股在 TradingView 免费完整图多数只支持 D/W/M，开盘也强制日线
+      // （精简图用东财分钟数据，不受此限制）
+      if (isCN) return 'D';
+      // 美股常规交易时段：美东 9:30–16:00（不含盘前盘后）用 1 分钟
       if (!tvIsWeekdayInTZ('America/New_York')) return 'D';
       var um = tvHMInTZ('America/New_York');
       if (um >= 9 * 60 + 30 && um < 16 * 60) return '1';
@@ -11656,19 +11651,38 @@ function tvIsWeekdayInTZ(tz) {
       const wrap = document.getElementById('tvChart');
       if (!wrap) return;
       if (myTok !== window.__chartLoadTok) return;
-      const raw = String(rawSym || 'AAPL');
+      var raw = String(rawSym || 'AAPL');
+      // 常见纳斯达克标的强制 NASDAQ:，避免 TV 匹配到同名外股导致价格「多一块」
+      try {
+        var bare0 = raw.replace(/^(NASDAQ|NYSE|AMEX|OTC):/i, '').toUpperCase();
+        var NASDAQ_FORCE = {
+          MU:1, AAPL:1, MSFT:1, GOOGL:1, GOOG:1, AMZN:1, META:1, NVDA:1, TSLA:1,
+          AMD:1, INTC:1, QCOM:1, AVGO:1, ASML:1, ARM:1, SMCI:1, ARM:1, COIN:1,
+          NFLX:1, ADBE:1, CSCO:1, PEP:1, COST:1, AZN:1, ISRG:1, AMAT:1, LRCX:1,
+          KLAC:1, SNPS:1, CDNS:1, MRVL:1, NXPI:1, MCHP:1, ON:1, CRWD:1, PANW:1,
+          ADBE:1, INTU:1, BKNG:1, SBUX:1, PYPL:1, ABNB:1, MRNA:1, PD:1
+        };
+        if (NASDAQ_FORCE[bare0] && !/^NASDAQ:/i.test(raw)) {
+          raw = 'NASDAQ:' + bare0;
+          try { lastChartSymbol = raw; } catch (eLS) {}
+        }
+      } catch (eNf) {}
       const sym = encodeURIComponent(raw);
       const isCN = /^SSE:|^SZSE:|^BSE:/.test(raw);
       const tz = isCN ? 'Asia%2FShanghai' : 'America%2FNew_York';
       const fid = 'tv_' + myTok + '_' + Date.now();
-      const interval = (typeof getTVSessionInterval === 'function')
+      // 美股开盘 1 分钟；A股完整图一律日线（TV 不支持多数 A 股分钟周期）
+      var interval = (typeof getTVSessionInterval === 'function')
         ? getTVSessionInterval(raw) : 'D';
+      if (/^SSE:|^SZSE:|^BSE:/.test(raw)) interval = 'D';
+      // 完整图隐藏顶栏大字报价（TV 数据源常与精简/Finnhub 不一致，避免显示「多出来」的错误价）
       const src = 'https://s.tradingview.com/widgetembed/?' +
         'frameElementId=' + fid +
         '&symbol=' + sym +
         '&interval=' + interval + '&theme=dark&style=1&timezone=' + tz +
-        '&locale=en&withdateranges=0&hideideas=1&symboledit=0&saveimage=0' +
-        '&hidesidetoolbar=1&hidetoptoolbar=0&hidevolume=0&toolbarbg=0d1117';
+        '&locale=zh_CN&withdateranges=0&hideideas=1&symboledit=0&saveimage=0' +
+        '&hidesidetoolbar=1&hidetoptoolbar=1&hidelegend=1&hidevolume=0&toolbarbg=0d1117' +
+        '&details=0&calendar=0&hotlist=0';
       wrap.innerHTML = '<iframe id="' + fid + '" src="' + src +
         '" style="width:100%;height:320px;border:0;border-radius:10px;background:#0d1117;" ' +
         'allowtransparency="true" scrolling="no" frameborder="0"></iframe>';
@@ -11951,7 +11965,44 @@ async function loadFullTVChart(symbol) {
       loadNews(false);
     }
 
-    function buildNewsListHtml(list) {
+    
+    /** 新闻时间统一 12 小时制（0 点显示 12，带 上午/下午） */
+    function formatNewsTime12h(timeStr) {
+      if (timeStr == null || timeStr === '') return '';
+      var s = String(timeStr).trim();
+      var m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (!m) {
+        // 尝试 Date 解析
+        try {
+          var dt = new Date(s.replace(/-/g, '/'));
+          if (!isNaN(dt.getTime())) {
+            var y = dt.getFullYear();
+            var mo = String(dt.getMonth() + 1).padStart(2, '0');
+            var d = String(dt.getDate()).padStart(2, '0');
+            var h = dt.getHours();
+            var mi = String(dt.getMinutes()).padStart(2, '0');
+            var sec = String(dt.getSeconds()).padStart(2, '0');
+            var ap = h < 12 ? '上午' : '下午';
+            var h12 = h % 12;
+            if (h12 === 0) h12 = 12;
+            return y + '-' + mo + '-' + d + ' ' + ap + ' ' + h12 + ':' + mi + ':' + sec;
+          }
+        } catch (e) {}
+        return s;
+      }
+      var y = m[1];
+      var mo = String(m[2]).padStart(2, '0');
+      var d = String(m[3]).padStart(2, '0');
+      var h = parseInt(m[4], 10);
+      var mi = m[5];
+      var sec = m[6] || '00';
+      var ap = h < 12 ? '上午' : '下午';
+      var h12 = h % 12;
+      if (h12 === 0) h12 = 12;
+      return y + '-' + mo + '-' + d + ' ' + ap + ' ' + h12 + ':' + mi + ':' + sec;
+    }
+
+function buildNewsListHtml(list) {
       // 防御性重建：先按时间倒序排好，再按「日期」分组去重。
       // 这样同一天的新闻永远聚在一起显示、右侧日期栏永远和正文顺序完全一致，
       // 不会因为个别条目时间解析异常（ts=0）而把某天拆成两截、或让日期栏乱序/漏项。
@@ -11988,7 +12039,9 @@ async function loadFullTVChart(symbol) {
         const dayItems = groups.get(dayKey) || [];
         for (let k = 0; k < dayItems.length; k++) {
           const item = dayItems[k];
-          const timeShow = item.time || '';
+          const timeShow = (typeof formatNewsTime12h === 'function')
+            ? formatNewsTime12h(item.time || '')
+            : (item.time || '');
           html += '<div class="news-item">' +
             '<a href="' + (item.link || '#') + '" target="_blank" rel="noopener">' +
             '<div class="news-time">' + timeShow + ' · ' + (item.source || '') + '</div>' +
@@ -12052,15 +12105,18 @@ async function loadFullTVChart(symbol) {
         if (rail) { rail.innerHTML = ''; rail.classList.remove('show'); }
         return;
       }
-      // 仅「本会话首次」从大缓存/数据库打开时：先画 5 天再逐批展开。
-      // 展开完成后打标；之后再进热点直接全量，不再每次只显示 5 天。
+      // 渐进展开：首批多画一些天；用户点的/滑到的日期必须纳入，避免快滑/点栏出现空白
       var fullList = list;
       var dayLimit = (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) ? opts.dayLimit : 0;
       window.__newsDaysFullyPainted = window.__newsDaysFullyPainted || { cn: false, en: false };
       var _newsLangKey = (typeof newsLang !== 'undefined' && newsLang === 'en') ? 'en' : 'cn';
       var alreadyFull = !!window.__newsDaysFullyPainted[_newsLangKey];
-      // dayLimit>0 表示正在展开批次中，仍要继续；否则只有未全量过才走渐进
+      // 条数不多或本会话已全量过：一次画完，杜绝「栏有日期、列表还没画」的黑洞
       var progressive = !opts.fullDays && !opts.skipProgressive && (!alreadyFull || dayLimit > 0);
+      if (!opts.fullDays && fullList && fullList.length && fullList.length <= 350) {
+        progressive = false;
+        try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (eSm) {}
+      }
       if (opts.fullDays) {
         try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (eF) {}
       }
@@ -12075,7 +12131,15 @@ async function loadFullTVChart(symbol) {
             daySeen[dk] = 1;
             dayOrder.push(dk);
           }
-          var limit = dayLimit > 0 ? dayLimit : 5;
+          var limit = dayLimit > 0 ? dayLimit : 12;
+          // 用户选中/待跳转日必须在 keep 里
+          try {
+            var needDay = window.__newsUserPickedDay || window.__newsPendingScrollDay || window.__newsFrozenDay || '';
+            if (needDay) {
+              var idxNeed = dayOrder.indexOf(needDay);
+              if (idxNeed >= limit) limit = idxNeed + 1;
+            }
+          } catch (eNeed) {}
           if (dayOrder.length > limit) {
             var keep = {};
             for (var ki = 0; ki < limit; ki++) keep[dayOrder[ki]] = 1;
@@ -12083,20 +12147,47 @@ async function loadFullTVChart(symbol) {
               var k = it.dayKey || (typeof parseNewsDayKey === 'function' ? parseNewsDayKey(it.time) : '');
               return !!keep[k];
             });
-            var nextLimit = limit + 5;
+            var nextLimit = limit + 8;
             var done = nextLimit >= dayOrder.length;
             if (!window.__newsProgressiveTimer) {
               window.__newsProgressiveTimer = setTimeout(function () {
                 window.__newsProgressiveTimer = null;
                 try {
+                  // 用户刚滑过或手指还在：再拖一会儿，避免加载重绘把页面拽回去
+                  var busy = window.__newsTouchActive;
+                  try {
+                    if (!busy && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 600) busy = true;
+                  } catch (eB) {}
+                  if (busy) {
+                    window.__newsProgressiveTimer = setTimeout(function retryProg() {
+                      window.__newsProgressiveTimer = null;
+                      try {
+                        var busy2 = window.__newsTouchActive;
+                        try {
+                          if (!busy2 && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 600) busy2 = true;
+                        } catch (eB2) {}
+                        if (busy2) {
+                          window.__newsProgressiveTimer = setTimeout(retryProg, 200);
+                          return;
+                        }
+                        if (done) {
+                          try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e1b) {}
+                          renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0, progressiveKeepScroll: true }));
+                        } else {
+                          renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false, progressiveKeepScroll: true }));
+                        }
+                      } catch (eR) {}
+                    }, 200);
+                    return;
+                  }
                   if (done) {
                     try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e1) {}
-                    renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0 }));
+                    renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0, progressiveKeepScroll: true }));
                   } else {
-                    renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false }));
+                    renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false, progressiveKeepScroll: true }));
                   }
                 } catch (eExp) {}
-              }, 90);
+              }, 120);
             }
           } else {
             try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e2) {}
@@ -12168,6 +12259,17 @@ async function loadFullTVChart(symbol) {
       container.innerHTML = built.html;
 
       function pin() {
+        // 加载/渐进展开：只锁 window.scrollY，不用日期钉点（钉点会把上滑拽回中间）
+        if (opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0)) {
+          try {
+            var y = prevScrollY;
+            if (y > 0 || hadContent) {
+              window.scrollTo(0, y);
+              requestAnimationFrame(function () { window.scrollTo(0, y); });
+            }
+          } catch (eY) {}
+          return;
+        }
         if (opts.forceTop || !hadContent) {
           // 首次填充：若有待跳转日期，直接去
           var pend = window.__newsPendingScrollDay || window.__newsUserPickedDay || '';
@@ -12207,6 +12309,30 @@ async function loadFullTVChart(symbol) {
         pin();
         requestAnimationFrame(function () {
           pin();
+          // 快滑兜底：视口空 → 立刻全量画完并贴回有内容区域
+          try {
+            if (opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) || opts.fullDays) {
+              var items = container.querySelectorAll('.news-item');
+              var anyVisible = false;
+              for (var vi = 0; vi < items.length; vi++) {
+                var r = items[vi].getBoundingClientRect();
+                if (r.bottom > 60 && r.top < (window.innerHeight || 600) - 40) { anyVisible = true; break; }
+              }
+              if (!items.length || !anyVisible) {
+                if (!opts.fullDays && fullList && fullList.length && !window.__newsForceFullOnce) {
+                  window.__newsForceFullOnce = true;
+                  setTimeout(function () {
+                    try {
+                      window.__newsForceFullOnce = false;
+                      renderNewsItems(fullList, { fullDays: true, progressiveKeepScroll: true, skipProgressive: true });
+                    } catch (eFF) {}
+                  }, 30);
+                } else if (items.length) {
+                  items[items.length - 1].scrollIntoView({ behavior: 'auto', block: 'nearest' });
+                }
+              }
+            }
+          } catch (eVis) {}
         });
       });
     }
@@ -13373,10 +13499,11 @@ function renderNewsDayRail(dayKeys, opts) {
         if (typeof invalidateNewsCacheIfNewDay === 'function') invalidateNewsCacheIfNewDay();
         const page = document.getElementById('page-hot');
         const onHot = page && page.classList.contains('active');
-        // 有完整缓存时提示更轻，避免打扰阅读
-        const hasCn = window.__newsCache && window.__newsCache.cnComplete && window.__newsCache.cn;
+        // 不在热点页：不做轮询请求（省流量，也不后台打扰）
+        if (!onHot) return;
+        // 静默检查：不显示「同步新新闻… xx%」，有新内容才改列表
         window.__newsQuietRefresh = true;
-        if (onHot) setNewsLoadingHint(true, hasCn ? '同步新新闻…' : '检查新新闻…', 0, (lang === 'en' || newsLang === 'en') ? 'en' : 'cn');
+        try { window.__newsLastQuietAt = Date.now(); } catch (eT) {}
 
         if (lang === 'cn' || !lang) {
           if (window.__newsManualRefresh) return;
@@ -13427,16 +13554,54 @@ function renderNewsDayRail(dayKeys, opts) {
       }
     }
 
+    // 热点页：记录最近滚动时间，加载重绘时避开正在滑的手势
+    if (!window.__newsScrollTrackBound) {
+      window.__newsScrollTrackBound = true;
+      window.__newsLastScrollAt = 0;
+      window.addEventListener('scroll', function () {
+        try {
+          var page = document.getElementById('page-hot');
+          if (page && page.classList.contains('active')) {
+            window.__newsLastScrollAt = Date.now();
+          }
+        } catch (e) {}
+      }, { passive: true });
+    }
+
     function startNewsAutoRefresh() {
       if (newsAutoTimer) {
         try { clearInterval(newsAutoTimer); } catch (e) {}
         newsAutoTimer = null;
       }
       newsAutoTimer = setInterval(function () {
-        // 后台静默刷新；在热点页会合并展示，不丢历史日期
+        // 仅在热点页、页面可见时检查；有新内容才更新列表（非真推送，约每 5 分钟轻量拉取一次）
+        try {
+          if (document.hidden) return;
+          var page = document.getElementById('page-hot');
+          if (!(page && page.classList.contains('active'))) return;
+        } catch (eV) { return; }
         quietRefreshNews(newsLang === 'en' ? 'en' : 'cn');
-      }, 60 * 1000); // 每 1 分钟
+      }, 3 * 60 * 1000); // 每 3 分钟（有变化才刷新 UI）
     }
+    // 回到前台且在热点页：补一次静默检查（有新才更新，不弹进度）
+    if (!window.__newsVisBound) {
+      window.__newsVisBound = true;
+      document.addEventListener('visibilitychange', function () {
+        try {
+          if (document.hidden) return;
+          var page = document.getElementById('page-hot');
+          if (!(page && page.classList.contains('active'))) return;
+          if (window.__newsManualRefresh) return;
+          var now = Date.now();
+          if (window.__newsLastQuietAt && now - window.__newsLastQuietAt < 90 * 1000) return;
+          window.__newsLastQuietAt = now;
+          if (typeof quietRefreshNews === 'function') {
+            quietRefreshNews(newsLang === 'en' ? 'en' : 'cn');
+          }
+        } catch (e) {}
+      });
+    }
+
 
     // ========== 后台预加载逻辑（与打开页展示分离）==========
     // 不碰 UI；只在「日期完整」时写入后台缓存，供下次打开直接调用
