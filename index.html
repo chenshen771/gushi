@@ -1245,6 +1245,13 @@
     .watch-item.down-accent::before { background: var(--red); }
 
     .watch-item.dragging { opacity: 0.92; box-shadow: 0 10px 28px rgba(0,0,0,0.4); z-index: 20; position: relative; border-color: var(--blue); touch-action: none; }
+    /* 长按过程中：还没进入正式拖拽 —— 淡蓝边提示「继续按住可排序」 */
+    .watch-item.press-hold {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(77, 159, 255, 0.35);
+      background: rgba(77, 159, 255, 0.06);
+    }
+    .watch-item.press-hold .drag-handle { color: var(--blue); transform: scale(1.08); }
     .watch-item.drag-over { border-color: var(--blue); background: var(--card-hover); }
     .drag-handle {
       color: var(--muted);
@@ -5327,12 +5334,17 @@ async function fetchQuote(symbol, opts) {
       // 正常操作也可能持续好几秒甚至更久，按总时长会把正常拖拽误杀成「超时」。
       // 改成按「最后一次有效活动（手指移动/自动滚动）距今」判定，只有真正没有
       // 任何活动、长时间静默的情况才当成异常，不再对慢速长按设时间上限。
+      // 正式拖拽中：不重建 DOM
       if (dragState) {
         if (Date.now() - (dragState.lastActiveAt || dragState.startedAt || 0) > 15000) {
           forceCleanupDrag();
         } else {
           return;
         }
+      }
+      // 长按等待中（已出/将出蓝框）：同样不重建，否则 2 秒轮询会拆掉节点 → 蓝框闪一下又没
+      if (typeof dragPending !== 'undefined' && dragPending) {
+        return;
       }
       const container = document.getElementById('watchList');
       try { updateWatchCountBadge(); } catch (e) {}
@@ -5453,20 +5465,41 @@ async function fetchQuote(symbol, opts) {
     // 位置，等一小段时间（且这段时间里没怎么移动）才真正开始排序」；如果
     // 这段时间里手指已经滑出去一段距离，就当成是想滚动页面，直接放弃这次
     // 拖拽判定，把触摸交还给系统走正常滚动。
-    const DRAG_LONG_PRESS_MS = 120;   // 按住这么久且基本没动，才判定为「要排序」
-    const DRAG_MOVE_CANCEL_PX = 10;   // 判定期间移动超过这个距离，视为滑动/误触，取消
+    // 长按约 0.3 秒进入排序（比 0.42 更好按）；约 0.12 秒先出淡蓝边。
+    // 出淡蓝边之后放宽抖动阈值，避免「框出来了又被轻微抖掉」。
+    // 必须「按住 ⋮⋮ 几乎不动」约 0.4 秒才进入排序。
+    // 手指一旦明显上下移、或页面已经在滚 → 一律当滑页，绝不进拖拽。
+    // 这样慢慢滑列表也不会误改顺序。
+    const DRAG_HINT_MS = 160;
+    const DRAG_LONG_PRESS_MS = 400;
+    const DRAG_STILL_PX = 10;   // 长按全程允许的最大位移（超过=在滑）
     let dragPending = null;
 
+    function clearPressHold(el) {
+      try { if (el) el.classList.remove('press-hold'); } catch (_) {}
+    }
+
+    function cancelDragPending() {
+      if (!dragPending) return;
+      clearTimeout(dragPending.timer);
+      clearTimeout(dragPending.hintTimer);
+      clearPressHold(dragPending.item);
+      clearPendingListeners();
+      dragPending = null;
+    }
+
+    function getPageScrollY() {
+      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    }
+
     function onPointerDown(e) {
-      // 已经在正式拖拽，或已经有一次按下在等待长按判定，忽略后续重入
       if (dragState || dragPending) return;
       const item = e.currentTarget;
       const handle = item.querySelector('.drag-handle');
       if (!handle) return;
-      // 只看触点横坐标是否落在手柄那一列（留一点容错边距），
-      // 不在这一列内就完全不拦截，交还给整行原本的点击 / 上下滚动
+      // 只认 ⋮⋮ 手柄列；点在股价/名称区域只滚动或进详情
       const hr = handle.getBoundingClientRect();
-      const TOL = 10;
+      const TOL = 12;
       const x = getEventX(e);
       if (x < hr.left - TOL || x > hr.right + TOL) return;
 
@@ -5478,7 +5511,15 @@ async function fetchQuote(symbol, opts) {
       const startX = getEventX(e);
       const startY = getEventY(e);
 
-      dragPending = { item, idx, startX, startY, isTouch };
+      dragPending = {
+        item: item,
+        idx: idx,
+        startX: startX,
+        startY: startY,
+        isTouch: isTouch,
+        hinted: false,
+        scrollY0: getPageScrollY()
+      };
       if (isTouch) {
         document.addEventListener('touchmove', onPendingMove, { passive: true });
         document.addEventListener('touchend', onPendingEnd, { passive: true });
@@ -5487,12 +5528,37 @@ async function fetchQuote(symbol, opts) {
         document.addEventListener('mousemove', onPendingMove);
         document.addEventListener('mouseup', onPendingEnd);
       }
+      // 阶段1：按住不动 → 淡蓝边（提示「再按住一下可排序」）
+      dragPending.hintTimer = setTimeout(function () {
+        if (!dragPending || dragPending.item !== item) return;
+        // 若这期间页面已滚过，仍不提示
+        if (Math.abs(getPageScrollY() - dragPending.scrollY0) > 2) {
+          cancelDragPending();
+          return;
+        }
+        dragPending.hinted = true;
+        try { item.classList.add('press-hold'); } catch (_) {}
+      }, DRAG_HINT_MS);
+      // 阶段2：继续不动 → 正式拖拽蓝框
       dragPending.timer = setTimeout(function () {
         if (!dragPending) return;
+        if (!dragPending.item.isConnected) {
+          cancelDragPending();
+          return;
+        }
+        if (Math.abs(getPageScrollY() - dragPending.scrollY0) > 2) {
+          cancelDragPending();
+          return;
+        }
         const p = dragPending;
+        // 保留 press-hold 样式过渡到 dragging，避免「框闪没」
         clearPendingListeners();
         dragPending = null;
+        try {
+          if (navigator.vibrate) navigator.vibrate(12);
+        } catch (_) {}
         beginDrag(p.item, p.idx, p.startX, p.startY, p.isTouch);
+        try { p.item.classList.remove('press-hold'); } catch (_) {}
       }, DRAG_LONG_PRESS_MS);
     }
 
@@ -5500,20 +5566,18 @@ async function fetchQuote(symbol, opts) {
       if (!dragPending) return;
       const dx = Math.abs(getEventX(e) - dragPending.startX);
       const dy = Math.abs(getEventY(e) - dragPending.startY);
-      if (dx > DRAG_MOVE_CANCEL_PX || dy > DRAG_MOVE_CANCEL_PX) {
-        // 移动超过阈值：判定为滑动/误触，不是要长按排序，取消待定，
-        // 什么都不拦截，触摸会按系统默认行为继续（也就是正常滚动）
-        clearTimeout(dragPending.timer);
-        clearPendingListeners();
-        dragPending = null;
+      // 页面在滚，或手指离开按下点 → 一定是滑页，取消排序
+      if (Math.abs(getPageScrollY() - dragPending.scrollY0) > 2) {
+        cancelDragPending();
+        return;
+      }
+      if (dx > DRAG_STILL_PX || dy > DRAG_STILL_PX) {
+        cancelDragPending();
       }
     }
 
     function onPendingEnd() {
-      if (!dragPending) return;
-      clearTimeout(dragPending.timer);
-      clearPendingListeners();
-      dragPending = null;
+      cancelDragPending();
     }
 
     function clearPendingListeners() {
@@ -5709,6 +5773,7 @@ async function fetchQuote(symbol, opts) {
       }
 
       item.classList.remove('dragging');
+      item.classList.remove('press-hold');
       item.style.transition = 'transform 0.22s var(--ease-smooth), box-shadow 0.15s';
       item.style.transform = '';
       document.body.classList.remove('drag-lock');
@@ -5767,6 +5832,7 @@ async function fetchQuote(symbol, opts) {
       const { item, layout } = dragState;
       try {
         item.classList.remove('dragging');
+        item.classList.remove('press-hold');
         item.style.transition = '';
         item.style.transform = '';
       } catch (_) {}
