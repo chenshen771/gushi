@@ -20454,24 +20454,40 @@ function normalizeAShareCode(sym) {
     function parseFedDecisionFromText(text) {
       const t = String(text || '').toLowerCase();
       if (!t) return null;
-      // 优先匹配明确决议
-      if (/cut(s|ting)?\s+(rates?|by)|rate cut|降低.*利率|降息\s*\d*|lower(s|ed)?\s+(the\s+)?(fed\s+)?funds|reduced\s+(the\s+)?target/.test(t)) {
+      // 降息
+      if (/cut(s|ting)?\s+(rates?|by)|rate cut|降低.*利率|降息\s*\d*|lower(s|ed)?\s+(the\s+)?(fed\s+)?funds|reduced\s+(the\s+)?target|lower\s+the\s+target\s+range/.test(t)) {
+        let bp = 25;
+        const m = t.match(/(\d+)\s*(basis\s*points|bp|基点)/) || t.match(/1\/4\s*(percentage\s*point|个点|个百分点)/);
+        if (m && m[1] && !String(m[0]).includes('1/4')) bp = Number(m[1]) || 25;
+        if (/1\/4|25\s*(bp|basis|基点)|四分之一/.test(t)) bp = 25;
+        if (/1\/2|50\s*(bp|basis|基点)|半个/.test(t)) bp = 50;
+        return { result: '降息 ' + bp + 'bp', tone: 'cut' };
+      }
+      // 加息（含官方声明 raise the target range / 上调至 3-3/4 to 4）
+      if (/hike(s|ing)?\s+(rates?|by)|rate hike|加息\s*\d*|raise(s|d)?\s+(the\s+)?(fed\s+)?funds|increased\s+(the\s+)?target|raise\s+the\s+target\s+range|上调.*利率|上调.*基点|上调.*百分点|上调至\s*3/.test(t)) {
         let bp = 25;
         const m = t.match(/(\d+)\s*(basis\s*points|bp|基点)/);
         if (m) bp = Number(m[1]) || 25;
-        return { result: '降息约' + bp + 'bp', tone: 'cut' };
+        if (/1\/4|25\s*(bp|basis|基点)|四分之一/.test(t)) bp = 25;
+        if (/1\/2|50\s*(bp|basis|基点)/.test(t)) bp = 50;
+        return { result: '加息 ' + bp + 'bp', tone: 'hike' };
       }
-      if (/hike(s|ing)?\s+(rates?|by)|rate hike|加息\s*\d*|raise(s|d)?\s+(the\s+)?(fed\s+)?funds|increased\s+(the\s+)?target/.test(t)) {
-        let bp = 25;
-        const m = t.match(/(\d+)\s*(basis\s*points|bp|基点)/);
-        if (m) bp = Number(m[1]) || 25;
-        return { result: '加息约' + bp + 'bp', tone: 'hike' };
-      }
-      if (/hold(s|ing)?\s+(rates?|steady)|kept\s+(rates?|the\s+target)|maintain(s|ed)?\s+(the\s+)?(target|rates?)|unchanged|维持不变|维持利率|按兵不动|保持.*不变/.test(t)) {
+      if (/hold(s|ing)?\s+(rates?|steady)|kept\s+(rates?|the\s+target)|maintain(s|ed)?\s+(the\s+)?(target|rates?)|unchanged|维持不变|维持利率|按兵不动|保持.*不变|decided\s+to\s+maintain/.test(t)) {
         return { result: '维持', tone: 'hold' };
       }
       return null;
     }
+
+    // 已确认的历史决议（新闻接口识别失败时的兜底；新会议仍走自动识别）
+    const FOMC_KNOWN_RESULTS = {
+      '2026-01-28': { result: '维持', rate: '3.50–3.75%', tone: 'hold' },
+      '2026-03-18': { result: '维持', rate: '3.50–3.75%', tone: 'hold' },
+      '2026-04-29': { result: '维持', rate: '3.50–3.75%', tone: 'hold' },
+      '2026-06-17': { result: '维持', rate: '3.50–3.75%', tone: 'hold' },
+      '2026-07-29': { result: '维持', rate: '3.50–3.75%', tone: 'hold' },
+      // 2026-09-16：加息 25bp 至 3.75%–4.00%，12–0（美联储官网声明）
+      '2026-09-16': { result: '加息 25bp', rate: '3.75–4.00%', tone: 'hike' }
+    };
 
     async function resolveFomcResult(meeting) {
       if (!meeting || !meeting.end) return { result: null, rate: null, source: '' };
@@ -20539,18 +20555,44 @@ function normalizeAShareCode(sym) {
         } catch (e) {}
       }
 
-      // 3) 已知会前参考：2026 年中多次维持（仅作会后短期回退，可被新闻覆盖）
-      if (!found && meeting.end <= '2026-07-29') {
-        found = { result: '维持', tone: 'hold' };
-        rateHint = rateHint || '3.50–3.75%';
+      // 3) 尝试经代理拉美联储官网会后声明（最准）
+      if (!found && typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        try {
+          const ymd = String(meeting.end).replace(/-/g, '');
+          const fedUrl = 'https://www.federalreserve.gov/newsevents/pressreleases/monetary' + ymd + 'a.htm';
+          const proxy = WORKER_BASE + (WORKER_BASE.indexOf('?') >= 0 ? '&' : '?') + 'url=' + encodeURIComponent(fedUrl);
+          const res = await fetch(proxy, { cache: 'no-store' });
+          if (res && res.ok) {
+            const html = await res.text();
+            const parsed = parseFedDecisionFromText(html);
+            if (parsed) {
+              found = parsed;
+              // 从声明里抠目标区间
+              const rm = html.match(/(\d[-–]?\d?\/?\d*\s*to\s*\d[-–]?\d?\/?\d*\s*percent)|(\d\.\d+\s*[-–]\s*\d\.\d+\s*%?)/i);
+              if (rm) rateHint = rm[0].replace(/\s+/g, ' ').trim();
+              if (/3-3\/4\s*to\s*4|3\.75\s*[-–]\s*4/.test(html)) rateHint = '3.75–4.00%';
+              if (/3-1\/2\s*to\s*3-3\/4|3\.50\s*[-–]\s*3\.75/.test(html)) rateHint = '3.50–3.75%';
+            }
+          }
+        } catch (eFed) {}
+      }
+
+      // 4) 已知已确认结果表（官网已出、新闻接口未识别时）
+      if (!found && FOMC_KNOWN_RESULTS[meeting.end]) {
+        const k = FOMC_KNOWN_RESULTS[meeting.end];
+        found = { result: k.result, tone: k.tone };
+        rateHint = rateHint || k.rate;
       }
 
       if (found) {
         const payload = {
           result: found.result,
-          rate: rateHint || (found.tone === 'hold' ? '3.50–3.75%' : null),
+          rate: rateHint || (found.tone === 'hold' ? '3.50–3.75%' : (found.tone === 'hike' ? '见声明' : null)),
           source: '自动识别/缓存'
         };
+        if (FOMC_KNOWN_RESULTS[meeting.end] && FOMC_KNOWN_RESULTS[meeting.end].rate) {
+          payload.rate = rateHint || FOMC_KNOWN_RESULTS[meeting.end].rate;
+        }
         saveFomcResult(meeting.end, payload);
         return payload;
       }
