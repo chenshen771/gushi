@@ -15315,29 +15315,34 @@ const FALLBACK_SECTORS = {
               var d0 = wrap0.data;
               var merged = {};
               var added = 0;
-              if (d0.map && typeof d0.map === 'object' && !d0.chunked) {
+              // 索引上可能被误写成「无 chunked 的小 map」；仍要尽量拼回分片，不能只信索引 map
+              if (d0.map && typeof d0.map === 'object') {
                 Object.keys(d0.map).forEach(function (k) {
                   var q = d0.map[k];
                   if (q && q.c > 0) { merged[k] = q; added++; }
                 });
               }
               var cn = Number(d0.chunks) || 0;
-              if (d0.chunked || cn > 0) {
-                for (var ci = 0; ci < (cn || 20); ci++) {
-                  try {
-                    var wc = await cloudCacheGet(baseKey + ':' + ci);
-                    if (!wc || !wc.data || !wc.data.map) {
-                      if (cn && ci >= cn) break;
-                      if (!cn && ci > 2 && added > 0) break;
-                      continue;
-                    }
-                    Object.keys(wc.data.map).forEach(function (k) {
-                      var q = wc.data.map[k];
-                      if (q && q.c > 0) { merged[k] = q; added++; }
-                    });
+              // 即使索引丢了 chunked/chunks，也探测 :0 :1 … 直到连续空片
+              var maxProbe = cn > 0 ? cn : 20;
+              var emptyStreak = 0;
+              for (var ci = 0; ci < maxProbe; ci++) {
+                try {
+                  var wc = await cloudCacheGet(baseKey + ':' + ci);
+                  if (!wc || !wc.data || !wc.data.map) {
+                    emptyStreak++;
                     if (cn && ci + 1 >= cn) break;
-                  } catch (eC) {}
-                }
+                    if (!cn && emptyStreak >= 2 && ci > 0) break;
+                    continue;
+                  }
+                  emptyStreak = 0;
+                  if (wc.data.chunks) cn = Number(wc.data.chunks) || cn;
+                  Object.keys(wc.data.map).forEach(function (k) {
+                    var q = wc.data.map[k];
+                    if (q && q.c > 0) { merged[k] = q; added++; }
+                  });
+                  if (cn && ci + 1 >= cn) break;
+                } catch (eC) {}
               }
               var mks = Object.keys(merged);
               if (mks.length < 50) return 0;
@@ -15445,25 +15450,24 @@ const FALLBACK_SECTORS = {
       try {
         if (typeof cloudCacheSet !== 'function' && typeof cloudCacheSetBg !== 'function') return;
         var n = Object.keys(window.__emUSMap || {}).length;
+        var classN = 0;
+        try {
+          var bl2 = window.__usEmByL2 || {};
+          Object.keys(bl2).forEach(function (k) { classN += (bl2[k] && bl2[k].length) || 0; });
+        } catch (eC) {}
         var payload = {
-          day: (new Date()).toISOString().slice(0, 10),
+          day: (typeof sectorLocalDayStr === 'function') ? sectorLocalDayStr() : (new Date()).toISOString().slice(0, 10),
           at: Date.now(),
           usCount: n,
           usTotal: window.__emUSMapTotal || n,
+          usClassN: classN,
           source: (extra && extra.source) || 'page',
           ms: (extra && extra.ms) || 0
         };
+        // 只写 meta。禁止用当前内存里不完整的 __emUSMap 覆盖 D1 的 sector:us:quotes 索引，
+        // 否则会把「分片完整全表」冲成几百只无 chunked 的小包，隔天打开角标就变少。
         if (typeof cloudCacheSetBg === 'function') cloudCacheSetBg('sector:daily:meta', payload, 3);
         else await cloudCacheSet('sector:daily:meta', payload, 3);
-        // 兼容 Worker Cron 使用的 key
-        if (n > 100 && typeof cloudCacheSetBg === 'function') {
-          var slim = {};
-          Object.keys(window.__emUSMap || {}).forEach(function (k) {
-            var q = window.__emUSMap[k];
-            if (q && q.c > 0) slim[k] = { c: q.c, d: q.d, dp: q.dp, h: q.h, l: q.l, o: q.o, pc: q.pc, name: q.name || '', _cachedAt: q._cachedAt, _src: q._src || 'em_us' };
-          });
-          cloudCacheSetBg('sector:us:quotes', { map: slim, at: Date.now(), total: n, day: payload.day }, 2);
-        }
       } catch (e) {}
     }
 
