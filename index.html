@@ -12355,9 +12355,44 @@ function buildNewsListHtml(list) {
       opts = opts || {};
       const container = document.getElementById('newsList');
       if (!container) return;
-      // 用户手指还按着（正在滑动）：延后这次刷新，先记下来，抬手后再补
-      if (window.__newsTouchActive && !opts.forceTop && !opts.forceReplace && container.querySelector('.news-item')) {
-        window.__newsPendingRender = { list: list, opts: opts };
+      // 手指按着或刚滑过：延后重绘，避免加载批次把滚动拽回旧位置
+      var scrollBusy = false;
+      try {
+        scrollBusy = !!window.__newsTouchActive;
+        if (!scrollBusy && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 380) scrollBusy = true;
+      } catch (eSb) {}
+      if (scrollBusy && !opts.forceTop && !opts.forceReplace && container.querySelector('.news-item')) {
+        var o2 = opts || {};
+        try { o2 = Object.assign({}, opts, { keepScroll: true, progressiveKeepScroll: true }); } catch (eO) { o2 = opts; }
+        window.__newsPendingRender = { list: list, opts: o2 };
+        try {
+          clearTimeout(window.__newsPendingFlushTimer);
+          window.__newsPendingFlushTimer = setTimeout(function () {
+            try {
+              if (window.__newsTouchActive) return;
+              if (window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 200) {
+                window.__newsPendingFlushTimer = setTimeout(function retryNewsFlush() {
+                  try {
+                    if (window.__newsTouchActive) return;
+                    if (window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 200) {
+                      window.__newsPendingFlushTimer = setTimeout(retryNewsFlush, 200);
+                      return;
+                    }
+                    var pending2 = window.__newsPendingRender;
+                    if (!pending2) return;
+                    window.__newsPendingRender = null;
+                    renderNewsItems(pending2.list, pending2.opts);
+                  } catch (eR) {}
+                }, 200);
+                return;
+              }
+              var pending = window.__newsPendingRender;
+              if (!pending) return;
+              window.__newsPendingRender = null;
+              renderNewsItems(pending.list, pending.opts);
+            } catch (eF) {}
+          }, 400);
+        } catch (eT) {}
         return;
       }
       const rail = document.getElementById('newsDayRail');
@@ -12367,15 +12402,15 @@ function buildNewsListHtml(list) {
         if (rail) { rail.innerHTML = ''; rail.classList.remove('show'); }
         return;
       }
-      // 渐进展开：首批多画一些天；用户点的/滑到的日期必须纳入，避免快滑/点栏出现空白
+      // 渐进展开：首批尽量覆盖整月，避免下滑到未绘制日期出现「整页空白」
       var fullList = list;
       var dayLimit = (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) ? opts.dayLimit : 0;
       window.__newsDaysFullyPainted = window.__newsDaysFullyPainted || { cn: false, en: false };
       var _newsLangKey = (typeof newsLang !== 'undefined' && newsLang === 'en') ? 'en' : 'cn';
       var alreadyFull = !!window.__newsDaysFullyPainted[_newsLangKey];
-      // 条数不多或本会话已全量过：一次画完，杜绝「栏有日期、列表还没画」的黑洞
+      // 条数不太夸张或本会话已全量过：一次画完，杜绝「栏有日期、列表还没画」的黑洞
       var progressive = !opts.fullDays && !opts.skipProgressive && (!alreadyFull || dayLimit > 0);
-      if (!opts.fullDays && fullList && fullList.length && fullList.length <= 350) {
+      if (!opts.fullDays && fullList && fullList.length && fullList.length <= 1200) {
         progressive = false;
         try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (eSm) {}
       }
@@ -12393,7 +12428,8 @@ function buildNewsListHtml(list) {
             daySeen[dk] = 1;
             dayOrder.push(dk);
           }
-          var limit = dayLimit > 0 ? dayLimit : 12;
+          // 默认先画 35 天（约一个月），再后台补更旧的
+          var limit = dayLimit > 0 ? dayLimit : 35;
           // 用户选中/待跳转日必须在 keep 里
           try {
             var needDay = window.__newsUserPickedDay || window.__newsPendingScrollDay || window.__newsFrozenDay || '';
@@ -12412,44 +12448,22 @@ function buildNewsListHtml(list) {
             var nextLimit = limit + 8;
             var done = nextLimit >= dayOrder.length;
             if (!window.__newsProgressiveTimer) {
-              window.__newsProgressiveTimer = setTimeout(function () {
+              window.__newsProgressiveTimer = setTimeout(function expandNewsDays() {
                 window.__newsProgressiveTimer = null;
                 try {
-                  // 用户刚滑过或手指还在：再拖一会儿，避免加载重绘把页面拽回去
-                  var busy = window.__newsTouchActive;
-                  try {
-                    if (!busy && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 600) busy = true;
-                  } catch (eB) {}
-                  if (busy) {
-                    window.__newsProgressiveTimer = setTimeout(function retryProg() {
-                      window.__newsProgressiveTimer = null;
-                      try {
-                        var busy2 = window.__newsTouchActive;
-                        try {
-                          if (!busy2 && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 600) busy2 = true;
-                        } catch (eB2) {}
-                        if (busy2) {
-                          window.__newsProgressiveTimer = setTimeout(retryProg, 200);
-                          return;
-                        }
-                        if (done) {
-                          try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e1b) {}
-                          renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0, progressiveKeepScroll: true }));
-                        } else {
-                          renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false, progressiveKeepScroll: true }));
-                        }
-                      } catch (eR) {}
-                    }, 200);
+                  // 仅手指按住时短暂延后；滑动中仍要继续展开天数，否则滑到未画区域会整页空白
+                  if (window.__newsTouchActive) {
+                    window.__newsProgressiveTimer = setTimeout(expandNewsDays, 180);
                     return;
                   }
                   if (done) {
                     try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e1) {}
-                    renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0, progressiveKeepScroll: true }));
+                    renderNewsItems(fullList, Object.assign({}, opts, { fullDays: true, dayLimit: 0, progressiveKeepScroll: true, keepScroll: true }));
                   } else {
-                    renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false, progressiveKeepScroll: true }));
+                    renderNewsItems(fullList, Object.assign({}, opts, { dayLimit: nextLimit, fullDays: false, progressiveKeepScroll: true, keepScroll: true }));
                   }
                 } catch (eExp) {}
-              }, 120);
+              }, 80);
             }
           } else {
             try { window.__newsDaysFullyPainted[_newsLangKey] = true; } catch (e2) {}
@@ -12458,7 +12472,8 @@ function buildNewsListHtml(list) {
       }
 
       const hadContent = !!container.querySelector('.news-item');
-      const prevScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+      // let：重绘间隙用户若继续滑，pin 会抬高目标 Y，避免一次次被拽回旧位置
+      let prevScrollY = window.scrollY || document.documentElement.scrollTop || 0;
       const built = (typeof buildNewsListHtml === 'function') ? buildNewsListHtml(list) : null;
       if (!built) return;
       const dayKeys = built.dayKeys || [];
@@ -12521,14 +12536,27 @@ function buildNewsListHtml(list) {
       container.innerHTML = built.html;
 
       function pin() {
-        // 加载/渐进展开：只锁 window.scrollY，不用日期钉点（钉点会把上滑拽回中间）
-        if (opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0)) {
+        // 用户正在滑 / 刚滑过 / 刷新重绘已有列表：只处理 scrollY，禁止日期钉点把页面拽上去
+        var userBusy = false;
+        try {
+          userBusy = !!window.__newsTouchActive;
+          if (!userBusy && window.__newsLastScrollAt && (Date.now() - window.__newsLastScrollAt) < 1500) userBusy = true;
+        } catch (eUb) {}
+        var keepY = !!(opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) || opts.keepScroll);
+        if (keepY || userBusy || (hadContent && !opts.forceTop && !window.__newsPendingScrollDay)) {
           try {
+            var cur = window.scrollY || document.documentElement.scrollTop || 0;
             var y = prevScrollY;
-            if (y > 0 || hadContent) {
-              window.scrollTo(0, y);
-              requestAnimationFrame(function () { window.scrollTo(0, y); });
+            if (typeof y !== 'number' || y < 0) y = 0;
+            // innerHTML 后浏览器常把滚动重置为 0 → 需要贴回 prev
+            // 但若用户在重绘间隙已经滑到别处（cur 明显偏离且 > 0），以用户当前位置为准，绝不能拽回去
+            if (cur <= 2 && y > 8) {
+              // DOM 被清空后的复位
+            } else if (Math.abs(cur - y) > 30) {
+              y = cur;
+              prevScrollY = cur;
             }
+            window.scrollTo(0, y);
           } catch (eY) {}
           return;
         }
@@ -12545,20 +12573,13 @@ function buildNewsListHtml(list) {
           }
           return;
         }
-        var day = window.__newsPendingScrollDay || window.__newsUserPickedDay || anchorDay;
+        // 仅「用户主动点了日期栏」才滚动到该日；普通刷新绝不改滚动
+        var day = window.__newsPendingScrollDay || '';
         if (day) {
           var el = document.getElementById('news-day-' + String(day).replace(/[^0-9]/g, ''));
           if (el) {
-            // 待跳转：强制顶齐；否则钉住原高度
-            if (window.__newsPendingScrollDay === day) {
-              el.scrollIntoView({ behavior: 'auto', block: 'start' });
-              window.__newsPendingScrollDay = '';
-            } else if (typeof pinNewsScrollToDay === 'function') {
-              pinNewsScrollToDay(day, pinnedTop);
-            } else {
-              var nowTop = el.getBoundingClientRect().top;
-              window.scrollBy(0, nowTop - pinnedTop);
-            }
+            el.scrollIntoView({ behavior: 'auto', block: 'start' });
+            window.__newsPendingScrollDay = '';
             setNewsDayRailActive(day, { noScroll: true });
             return;
           }
@@ -12570,10 +12591,18 @@ function buildNewsListHtml(list) {
       requestAnimationFrame(function () {
         pin();
         requestAnimationFrame(function () {
-          pin();
-          // 快滑兜底：视口空 → 立刻全量画完并贴回有内容区域
+          // 第二帧：若用户已在滑，不要再强行 scrollTo 旧 Y
           try {
-            if (opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) || opts.fullDays) {
+            var cur2 = window.scrollY || document.documentElement.scrollTop || 0;
+            if (cur2 <= 2 && prevScrollY > 8) {
+              window.scrollTo(0, prevScrollY);
+            } else if (cur2 > 2) {
+              prevScrollY = cur2;
+            }
+          } catch (eP2) {}
+          // 快滑兜底：视口空 → 立刻全量画完；滚动以当前为准
+          try {
+            if (opts.progressiveKeepScroll || (typeof opts.dayLimit === 'number' && opts.dayLimit > 0) || opts.fullDays || opts.keepScroll) {
               var items = container.querySelectorAll('.news-item');
               var anyVisible = false;
               for (var vi = 0; vi < items.length; vi++) {
@@ -12586,11 +12615,9 @@ function buildNewsListHtml(list) {
                   setTimeout(function () {
                     try {
                       window.__newsForceFullOnce = false;
-                      renderNewsItems(fullList, { fullDays: true, progressiveKeepScroll: true, skipProgressive: true });
+                      renderNewsItems(fullList, { fullDays: true, progressiveKeepScroll: true, skipProgressive: true, keepScroll: true });
                     } catch (eFF) {}
                   }, 30);
-                } else if (items.length) {
-                  items[items.length - 1].scrollIntoView({ behavior: 'auto', block: 'nearest' });
                 }
               }
             }
@@ -13823,9 +13850,40 @@ function renderNewsDayRail(dayKeys, opts) {
       window.addEventListener('scroll', function () {
         try {
           var page = document.getElementById('page-hot');
-          if (page && page.classList.contains('active')) {
-            window.__newsLastScrollAt = Date.now();
+          if (!page || !page.classList.contains('active')) return;
+          window.__newsLastScrollAt = Date.now();
+          // 下滑到未绘制区域会出现整页空白：立刻用完整列表补画并锁住滚动
+          var listEl = document.getElementById('newsList');
+          if (!listEl) return;
+          var items = listEl.querySelectorAll('.news-item');
+          var anyVisible = false;
+          for (var vi = 0; vi < items.length; vi++) {
+            var r = items[vi].getBoundingClientRect();
+            if (r.bottom > 80 && r.top < (window.innerHeight || 600) - 40) {
+              anyVisible = true;
+              break;
+            }
           }
+          if (items.length && anyVisible) return;
+          if (window.__newsEmptyFillLock) return;
+          var lang = (typeof newsLang !== 'undefined' && newsLang === 'en') ? 'en' : 'cn';
+          var full = null;
+          try {
+            if (window.__newsCache) {
+              full = lang === 'en' ? window.__newsCache.en : window.__newsCache.cn;
+            }
+          } catch (eC) {}
+          if ((!full || !full.length) && window.__newsProgress) {
+            full = lang === 'en' ? window.__newsProgress.en : window.__newsProgress.cn;
+          }
+          if (!full || !full.length) return;
+          window.__newsEmptyFillLock = true;
+          try {
+            if (typeof renderNewsItems === 'function') {
+              renderNewsItems(full, { fullDays: true, progressiveKeepScroll: true, keepScroll: true, skipProgressive: true });
+            }
+          } catch (eR) {}
+          setTimeout(function () { window.__newsEmptyFillLock = false; }, 400);
         } catch (e) {}
       }, { passive: true });
     }
