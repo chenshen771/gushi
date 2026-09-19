@@ -2948,18 +2948,33 @@
     let fhWsSubs = new Set(); // 当前已订阅的美股代码
     let fhWsWanted = new Set();
     let fhWsReconnectTimer = null;
-    let fhWsStatus = 'off'; // off | connecting | live | error
+    let fhWsConnectTimeout = null;
+    let fhWsWatchdogTimer = null;
+    let fhWsLastMsgAt = 0;
+    let fhWsReconnectAttempt = 0;
+    let fhWsStatus = 'off'; // off | connecting | live | error | overlimit
+    let fhWsConnectStartedAt = 0;   // 发起连接时间
+    let fhWsHandshakeMs = null;     // 握手耗时 ms
+    let fhWsLastPushLagMs = null;   // 最近一条推送相对服务器时间的延迟 ms
+    let fhWsLastPushAt = 0;         // 本地收到最近推送的时间
 
     function fhWsIsUsSymbol(sym) {
       if (!sym) return false;
       if (typeof isAShareSymbol === 'function' && isAShareSymbol(sym)) return false;
-      // 排除指数等
-      const s = String(sym).toUpperCase();
+      // 排除指数、A股6位码；海力士 SKHY 等别名照常可订阅（此前也无问题）
+      const s = String(sym).toUpperCase().trim();
       if (/^\d{6}/.test(s)) return false;
-      return /^[A-Z][A-Z0-9.\-^]*$/.test(s);
+      if (/\.(KS|KQ|HK|T|L|SS|SZ)$/.test(s)) return false;
+      return /^[A-Z][A-Z0-9.\-^]{0,14}$/.test(s);
     }
 
     function updateFhWsBadge() {
+      try {
+        var panel = document.getElementById('netPanel');
+        if (panel && panel.classList.contains('show') && typeof renderNetPanelBody === 'function') {
+          renderNetPanelBody();
+        }
+      } catch (eP) {}
       let el = document.getElementById('fhWsBadge');
       if (!el) {
         const st = document.querySelector('.watch-status');
@@ -2972,10 +2987,17 @@
       }
       if (!el) return;
       if (fhWsStatus === 'live') {
-        el.textContent = '● WS推送';
-        el.style.color = 'var(--green)';
+        var nUs = 0;
+        try { nUs = fhWsUsWatchCount(); } catch (eN) {}
+        if (nUs > 50) {
+          el.textContent = '● WS前50·其余实时';
+          el.style.color = 'var(--green)';
+        } else {
+          el.textContent = '● WS推送';
+          el.style.color = 'var(--green)';
+        }
       } else if (fhWsStatus === 'overlimit') {
-        el.textContent = '○ 超50只·实时刷新';
+        el.textContent = '○ 实时刷新';
         el.style.color = 'var(--orange)';
       } else if (fhWsStatus === 'connecting') {
         el.textContent = '○ 连接中';
@@ -3072,32 +3094,47 @@
     }
 
         function fhWsShouldUse() {
-      // 免费档约 50 只；超过则退回 REST 轮询
-      return fhWsUsWatchCount() <= 50;
+      // 有美股就开 WS；订阅上限在 fhWsPickWanted 截成 50，超出走 REST
+      return fhWsUsWatchCount() > 0;
+    }
+
+    // 免费档约 50 路：观察列表顺序优先，详情当前标的插最前
+    function fhWsPickWanted() {
+      var MAX = 50;
+      var wanted = [];
+      var seen = new Set();
+      function add(sym) {
+        if (!sym || wanted.length >= MAX) return;
+        if (!fhWsIsUsSymbol(sym)) return;
+        var u = String(sym).toUpperCase();
+        if (seen.has(u)) return;
+        seen.add(u);
+        wanted.push(u);
+      }
+      try {
+        if (typeof liveDetailSymbol === 'string' && liveDetailSymbol) add(liveDetailSymbol);
+      } catch (e0) {}
+      (watchlist || []).forEach(function (s) { add(s); });
+      return wanted;
     }
 
     function fhWsSyncSubscriptions() {
       if (!fhWs || fhWs.readyState !== 1) return;
 
       if (!fhWsShouldUse()) {
-        // 超限：全部退订，标记为 rest 模式
+        // 没有美股：退订
         fhWsSubs.forEach(function (s) {
           try { fhWs.send(JSON.stringify({ type: 'unsubscribe', symbol: s })); } catch (e) {}
         });
         fhWsSubs = new Set();
         fhWsWanted = new Set();
-        fhWsStatus = 'overlimit';
         updateFhWsBadge();
         return;
       }
 
-      const wanted = new Set();
-      (watchlist || []).forEach(function (s) {
-        if (fhWsIsUsSymbol(s)) wanted.add(String(s).toUpperCase());
-      });
-      if (typeof liveDetailSymbol === 'string' && liveDetailSymbol && fhWsIsUsSymbol(liveDetailSymbol)) {
-        wanted.add(String(liveDetailSymbol).toUpperCase());
-      }
+      // 前 50 只走 WS（列表顺序优先，详情当前股优先），超出的不订阅、走 REST
+      var list = (typeof fhWsPickWanted === 'function') ? fhWsPickWanted() : [];
+      var wanted = new Set(list);
       fhWsWanted = wanted;
 
       fhWsSubs.forEach(function (s) {
@@ -3114,21 +3151,116 @@
       });
       if (fhWsStatus !== 'live') {
         fhWsStatus = 'live';
-        updateFhWsBadge();
       }
+      updateFhWsBadge();
     }
 
-    function fhWsConnect() {
-      if (fhWs && (fhWs.readyState === 0 || fhWs.readyState === 1)) return;
-      if (typeof FINNHUB_KEY === 'undefined' || !FINNHUB_KEY) return;
+    function fhWsClearTimers() {
+      try { if (fhWsReconnectTimer) clearTimeout(fhWsReconnectTimer); } catch (e) {}
+      fhWsReconnectTimer = null;
+      try { if (fhWsConnectTimeout) clearTimeout(fhWsConnectTimeout); } catch (e) {}
+      fhWsConnectTimeout = null;
+      try { if (fhWsWatchdogTimer) clearInterval(fhWsWatchdogTimer); } catch (e) {}
+      fhWsWatchdogTimer = null;
+    }
+
+    function fhWsScheduleReconnect(reason) {
+      if (typeof fhWsShouldUse === 'function' && !fhWsShouldUse()) {
+        fhWsStatus = 'overlimit';
+        updateFhWsBadge();
+        return;
+      }
+      // 页面不可见时先不狂重连，回来 visibility 再连
       try {
+        if (typeof document !== 'undefined' && document.hidden) {
+          fhWsStatus = 'error';
+          updateFhWsBadge();
+          return;
+        }
+      } catch (eH) {}
+      if (fhWsReconnectTimer) return;
+      fhWsReconnectAttempt = Math.min((fhWsReconnectAttempt || 0) + 1, 8);
+      // 约 3s → 6s → 9s … 上限 30s（原节奏）
+      var delay = Math.min(30000, fhWsReconnectAttempt * 3000);
+      fhWsStatus = 'error';
+      updateFhWsBadge();
+      fhWsReconnectTimer = setTimeout(function () {
+        fhWsReconnectTimer = null;
+        try { fhWsConnect(true); } catch (eC) {}
+      }, delay);
+    }
+
+    function fhWsStartWatchdog() {
+      try { if (fhWsWatchdogTimer) clearInterval(fhWsWatchdogTimer); } catch (e) {}
+      fhWsLastMsgAt = Date.now();
+      fhWsWatchdogTimer = setInterval(function () {
+        try {
+          if (!fhWs || fhWs.readyState !== 1) return;
+          // 约 90 秒完全无消息（含 ping）：半开连接，主动断开再连（原节奏）
+          if (fhWsLastMsgAt && (Date.now() - fhWsLastMsgAt) > 90000) {
+            try { fhWs.close(); } catch (eCl) {}
+          }
+        } catch (eW) {}
+      }, 15000);
+    }
+
+    function fhWsConnect(fromReconnect) {
+      if (typeof FINNHUB_KEY === 'undefined' || !FINNHUB_KEY) return;
+      if (typeof fhWsShouldUse === 'function' && !fhWsShouldUse()) {
+        fhWsStatus = 'overlimit';
+        updateFhWsBadge();
+        return;
+      }
+      // 已连接
+      if (fhWs && fhWs.readyState === 1) {
+        try { fhWsSyncSubscriptions(); } catch (eS) {}
+        return;
+      }
+      // 正在连接：未超时前不要被 visibility/online 重复打断；超时由约 6s 定时器处理
+      if (fhWs && fhWs.readyState === 0) {
+        if (!fromReconnect) return;
+        if (fhWsConnectStartedAt && (Date.now() - fhWsConnectStartedAt) < 4000) return;
+        try { fhWs.close(); } catch (e) {}
+        fhWs = null;
+      }
+      // 清理旧 socket
+      if (fhWs && fhWs.readyState === 3) fhWs = null;
+      if (fhWs && fhWs.readyState === 2) {
+        try { fhWs.close(); } catch (e) {}
+        fhWs = null;
+      }
+
+      try {
+        fhWsClearTimers();
+        fhWsConnectStartedAt = Date.now();
+        fhWsHandshakeMs = null;
         fhWsStatus = 'connecting';
         updateFhWsBadge();
-        fhWs = new WebSocket('wss://ws.finnhub.io?token=' + encodeURIComponent(FINNHUB_KEY));
-        fhWs.onopen = function () {
+        var sock = new WebSocket('wss://ws.finnhub.io?token=' + encodeURIComponent(FINNHUB_KEY));
+        fhWs = sock;
+        // 连接超时
+        fhWsConnectTimeout = setTimeout(function () {
+          fhWsConnectTimeout = null;
+          try {
+            if (fhWs === sock && sock.readyState !== 1) {
+              try { sock.close(); } catch (e) {}
+            }
+          } catch (eT) {}
+        }, 6000);
+
+        sock.onopen = function () {
+          if (fhWs !== sock) return;
+          try { if (fhWsConnectTimeout) clearTimeout(fhWsConnectTimeout); } catch (e) {}
+          fhWsConnectTimeout = null;
+          fhWsReconnectAttempt = 0;
           fhWsStatus = 'live';
           fhWsSubs = new Set();
+          fhWsLastMsgAt = Date.now();
+          try {
+            if (fhWsConnectStartedAt) fhWsHandshakeMs = Math.max(0, Date.now() - fhWsConnectStartedAt);
+          } catch (eHs) { fhWsHandshakeMs = null; }
           updateFhWsBadge();
+          fhWsStartWatchdog();
           fhWsSyncSubscriptions();
           // 连上后详情若在美股，停掉 REST 轮询
           if (typeof liveDetailSymbol === 'string' && liveDetailSymbol && !liveDetailIsCN) {
@@ -3142,53 +3274,103 @@
             if (tag) { tag.textContent = '● WS'; tag.style.color = 'var(--green)'; }
           }
         };
-        fhWs.onmessage = function (ev) {
+        sock.onmessage = function (ev) {
+          if (fhWs !== sock) return;
+          fhWsLastMsgAt = Date.now();
           try {
             const msg = JSON.parse(ev.data);
             if (msg.type === 'ping') {
-              try { fhWs.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+              try { sock.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
               return;
             }
             if (msg.type === 'trade' && Array.isArray(msg.data)) {
-              msg.data.forEach(function (t) {
-                if (t && t.s && t.p) fhWsApplyTrade(t.s, Number(t.p), t.t);
+              msg.data.forEach(function (tr) {
+                if (tr && tr.s && tr.p) {
+                  try {
+                    fhWsLastPushAt = Date.now();
+                    if (tr.t) {
+                      var lag = Date.now() - Number(tr.t);
+                      // 过滤异常时钟差
+                      if (lag >= 0 && lag < 60000) fhWsLastPushLagMs = lag;
+                    }
+                  } catch (eLag) {}
+                  fhWsApplyTrade(tr.s, Number(tr.p), tr.t);
+                }
               });
+              // 面板打开时刷新延迟数字（节流）
+              try {
+                if (!window.__fhWsLagUiAt || Date.now() - window.__fhWsLagUiAt > 1500) {
+                  window.__fhWsLagUiAt = Date.now();
+                  var panel = document.getElementById('netPanel');
+                  if (panel && panel.classList.contains('show') && typeof renderNetPanelBody === 'function') {
+                    renderNetPanelBody();
+                  }
+                }
+              } catch (eUi) {}
             }
           } catch (e) {}
         };
-        fhWs.onerror = function () {
+        sock.onerror = function () {
+          if (fhWs !== sock) return;
           fhWsStatus = 'error';
           updateFhWsBadge();
         };
-        fhWs.onclose = function () {
-          fhWsStatus = 'error';
+        sock.onclose = function () {
+          if (fhWs !== sock) return;
+          fhWs = null;
           fhWsSubs = new Set();
-          updateFhWsBadge();
+          try { if (fhWsWatchdogTimer) clearInterval(fhWsWatchdogTimer); } catch (e) {}
+          fhWsWatchdogTimer = null;
+          try { if (fhWsConnectTimeout) clearTimeout(fhWsConnectTimeout); } catch (e) {}
+          fhWsConnectTimeout = null;
           // 断开：详情美股改回轮询
           if (typeof liveDetailSymbol === 'string' && liveDetailSymbol && !liveDetailIsCN) {
             if (typeof startLiveDetail === 'function') startLiveDetail(liveDetailSymbol, false);
           }
-          if (fhWsReconnectTimer) clearTimeout(fhWsReconnectTimer);
-          fhWsReconnectTimer = setTimeout(function () {
-            if (typeof fhWsShouldUse === 'function' && fhWsShouldUse()) fhWsConnect();
-          }, 3000);
+          fhWsScheduleReconnect('close');
         };
       } catch (e) {
         fhWsStatus = 'error';
         updateFhWsBadge();
+        fhWsScheduleReconnect('exception');
       }
+    }
+
+    // 回到前台 / 网络恢复：自动重连 WS
+    if (!window.__fhWsLifecycleBound) {
+      window.__fhWsLifecycleBound = true;
+      try {
+        document.addEventListener('visibilitychange', function () {
+          if (document.hidden) return;
+          try {
+            if (typeof fhWsShouldUse === 'function' && !fhWsShouldUse()) return;
+            if (!fhWs || fhWs.readyState !== 1) {
+              fhWsReconnectAttempt = 0;
+              fhWsConnect(true);
+            } else {
+              fhWsSyncSubscriptions();
+            }
+          } catch (eV) {}
+        });
+      } catch (e1) {}
+      try {
+        window.addEventListener('online', function () {
+          try {
+            fhWsReconnectAttempt = 0;
+            if (typeof fhWsShouldUse === 'function' && fhWsShouldUse()) fhWsConnect(true);
+          } catch (eO) {}
+        });
+      } catch (e2) {}
     }
 
     function fhWsOnWatchlistChanged() {
       if (!fhWsShouldUse()) {
-        // 超过 50：关掉订阅，靠 REST
+        // 无美股：若还连着则退订
         if (fhWs && fhWs.readyState === 1) fhWsSyncSubscriptions();
-        else {
-          fhWsStatus = 'overlimit';
-          updateFhWsBadge();
-        }
+        else updateFhWsBadge();
         return;
       }
+      // 有美股：连接或同步；超过 50 也保持 WS，仅订阅前 50
       if (!fhWs || fhWs.readyState !== 1) fhWsConnect();
       else fhWsSyncSubscriptions();
     }
@@ -5848,7 +6030,31 @@ async function fetchQuote(symbol, opts) {
     async function refreshQuotes() {
       // 不再闪「更新中…」，状态行由 watchStatusClock 统一刷新
       renderWatchlist();
-      const data = await fetchQuotes(watchlist, function (sym, q) {
+      var list = watchlist || [];
+      try {
+        // WS 已连且超过 50：多数时候只拉「未订阅的美股 + 全部 A股」，省额度
+        // 每 30s 仍全量补一次 OHLC（含 WS 那 50 只的最高最低昨收）
+        if (typeof fhWsActive === 'function' && fhWsActive() && typeof fhWsUsWatchCount === 'function' && fhWsUsWatchCount() > 50 && fhWsSubs && fhWsSubs.size) {
+          var full = !window.__lastFullOhlcWatch || (Date.now() - window.__lastFullOhlcWatch > 30000);
+          if (full) {
+            window.__lastFullOhlcWatch = Date.now();
+            list = watchlist || [];
+          } else {
+            list = (watchlist || []).filter(function (s) {
+              try {
+                if (typeof isAShareSymbol === 'function' && isAShareSymbol(s)) return true;
+                if (typeof fhWsIsUsSymbol === 'function' && !fhWsIsUsSymbol(s)) return true;
+                return !fhWsSubs.has(String(s).toUpperCase());
+              } catch (eF) { return true; }
+            });
+            if (!list.length) {
+              if (typeof paintWatchStatus === 'function') paintWatchStatus();
+              return;
+            }
+          }
+        }
+      } catch (eSel) {}
+      const data = await fetchQuotes(list, function (sym, q) {
         quoteCache[sym] = q;
         renderWatchlist();
       });
@@ -22182,8 +22388,12 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       const detailOpen = drawer && drawer.classList.contains('show');
       if (page && page.classList.contains('active') && !detailOpen) {
         if (typeof fhWsActive === 'function' && fhWsActive()) {
-          // 仅补最高最低昨收（WS 只有最新价）
-          if (!window.__lastRestWatch || Date.now() - window.__lastRestWatch > 30000) {
+          var nUs = 0;
+          try { nUs = fhWsUsWatchCount(); } catch (eN) {}
+          // ≤50：WS 覆盖全部美股，30s 补一次 OHLC
+          // >50：前50走 WS，其余 + 补 OHLC 更勤（约 3s）
+          var gap = (nUs > 50) ? 3000 : 30000;
+          if (!window.__lastRestWatch || Date.now() - window.__lastRestWatch > gap) {
             window.__lastRestWatch = Date.now();
             refreshQuotes();
           }
@@ -22300,18 +22510,76 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       return out;
     }
 
+    function netWsStatusRowHtml() {
+      var st = (typeof fhWsStatus !== 'undefined') ? fhWsStatus : '';
+      var nSub = 0;
+      try { if (typeof fhWsSubs !== 'undefined' && fhWsSubs && fhWsSubs.size) nSub = fhWsSubs.size; } catch (e) {}
+      var name = 'Finnhub WebSocket';
+      var desc = '美股实时推送';
+      var text = '未启用';
+      var cls = 'pending';
+      var lagParts = [];
+      try {
+        if (typeof fhWsHandshakeMs === 'number' && fhWsHandshakeMs >= 0) {
+          lagParts.push('握手 ' + fhWsHandshakeMs + 'ms');
+        }
+        if (typeof fhWsLastPushLagMs === 'number' && fhWsLastPushLagMs >= 0) {
+          lagParts.push('推送 ' + fhWsLastPushLagMs + 'ms');
+        }
+      } catch (eL) {}
+      if (st === 'live') {
+        text = (typeof fhWsLastPushLagMs === 'number' && fhWsLastPushLagMs >= 0)
+          ? (fhWsLastPushLagMs + 'ms')
+          : ((typeof fhWsHandshakeMs === 'number' && fhWsHandshakeMs >= 0) ? (fhWsHandshakeMs + 'ms') : '已连接');
+        cls = (typeof fhWsLastPushLagMs === 'number' && fhWsLastPushLagMs > 1200) ? 'mid'
+          : (typeof fhWsLastPushLagMs === 'number' && fhWsLastPushLagMs > 500) ? 'mid' : 'ok';
+        var nUs = 0;
+        try { nUs = fhWsUsWatchCount(); } catch (eN) {}
+        desc = '推送中' + (nSub ? (' · 订阅 ' + nSub + ' 只') : '');
+        if (nUs > 50) desc += ' · 其余实时刷新';
+        if (lagParts.length) desc += ' · ' + lagParts.join(' · ');
+      } else if (st === 'connecting') {
+        text = '连接中';
+        cls = 'mid';
+        if (fhWsConnectStartedAt) {
+          var el = Math.round((Date.now() - fhWsConnectStartedAt) / 1000);
+          desc = '握手中已 ' + el + 's';
+        }
+      } else if (st === 'overlimit') {
+        text = '超限';
+        cls = 'mid';
+        desc = '超过50只 · 改用实时刷新';
+      } else if (st === 'error' || st === 'closed' || st === 'offline') {
+        text = '已断开';
+        cls = 'bad';
+        desc = '自动重连中 · 暂用实时刷新';
+        if (lagParts.length) desc += ' · 上次 ' + lagParts.join(' · ');
+      } else if (!st || st === 'off') {
+        text = '--';
+        cls = 'pending';
+        desc = '打开观察列表后检测';
+      } else {
+        text = String(st);
+        cls = 'mid';
+      }
+      return '<div class="np-row"><div><div class="np-name">' + name +
+        '</div><div class="np-desc">' + desc +
+        '</div></div><div class="np-ms ' + cls + '">' + text + '</div></div>';
+    }
+
     function renderNetPanelBody() {
       const body = document.getElementById('netPanelBody');
       if (!body) return;
+      var wsRow = netWsStatusRowHtml();
       if (netProbeBusy && !lastNetDetails.length) {
-        body.innerHTML = '<div class="np-row"><div><div class="np-name">探测中…</div></div><div class="np-ms pending">--</div></div>';
+        body.innerHTML = wsRow + '<div class="np-row"><div><div class="np-name">探测中…</div></div><div class="np-ms pending">--</div></div>';
         return;
       }
       if (!lastNetDetails.length) {
-        body.innerHTML = '<div class="np-row"><div><div class="np-name">暂无数据</div><div class="np-desc">点刷新开始探测</div></div><div class="np-ms pending">--</div></div>';
+        body.innerHTML = wsRow + '<div class="np-row"><div><div class="np-name">暂无数据</div><div class="np-desc">点刷新开始探测</div></div><div class="np-ms pending">--</div></div>';
         return;
       }
-      let html = '';
+      let html = wsRow;
       lastNetDetails.forEach(function (d) {
         var msText, cls;
         if (d.ms != null && d.ok) {
