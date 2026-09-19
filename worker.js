@@ -1,6 +1,6 @@
 export default {
   async scheduled(event, env, ctx) {
-    // Cloudflare Cron：关网页也会跑。Dashboard → Triggers → Cron 例如 0 1 * * * (UTC≈北京时间09:00)
+    // Cloudflare Cron：关网页也会跑。Dashboard → Triggers → Cron 例如 0 22 * * * (UTC≈北京时间06:00)
     ctx.waitUntil(runSectorDailyJob(env).catch(function (e) {
       console.log('sector daily job fail', String(e));
     }));
