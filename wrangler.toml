@@ -14,4 +14,4 @@ database_name = "gushi-db"
 database_id = "aef25a14-fa9f-447a-adf7-9e76ae60c0ad"
 
 [triggers]
-crons = ["0 1 * * *"]
+crons = ["0 22 * * *"]
