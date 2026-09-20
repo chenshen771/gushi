@@ -941,6 +941,44 @@ async function runSectorDailyJob(env) {
       .run();
   }
 
+  async function getCache(key) {
+    try {
+      const res = await env.DB.prepare(
+        'SELECT value, expires_at FROM cache_kv WHERE key = ?'
+      )
+        .bind(key)
+        .first();
+      if (!res || !res.value) return null;
+      if (res.expires_at) {
+        const exp = Date.parse(res.expires_at);
+        if (!isNaN(exp) && exp < Date.now()) return null;
+      }
+      return JSON.parse(res.value);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 完整度评分：成分越多、有效涨跌越多越好；全 0 涨跌会很低 */
+  function scoreCNPackage(meta, boards) {
+    var stockN = 0;
+    var chgN = 0;
+    var keys = meta ? Object.keys(meta) : [];
+    keys.forEach(function (k) {
+      var m = meta[k] || {};
+      stockN += Number(m.count) || 0;
+      var c = Number(m.chg);
+      if (!isNaN(c) && Math.abs(c) > 0.001) chgN++;
+    });
+    if (boards && boards.length) {
+      boards.forEach(function (b) {
+        var c = Number(b && b.chg);
+        if (!isNaN(c) && Math.abs(c) > 0.001) chgN++;
+      });
+    }
+    return { stockN: stockN, chgN: chgN, boardN: keys.length };
+  }
+
   // ---- 美股：东财 clist 分页（精简字段，约全市场）----
   const usMap = {};
   let usTotal = 0;
@@ -1006,57 +1044,96 @@ async function runSectorDailyJob(env) {
   const CHUNK = 2500;
   const chunkN = Math.ceil(allKeys.length / CHUNK) || 1;
   const atNow = Date.now();
-  // 索引：不带大 map，只记分片数
-  await putCache(
-    'sector:us:quotes',
-    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
-    2
-  );
-  // 兼容网页 hydrate 的另一 key
-  await putCache(
-    'sector:em_us_universe',
-    { day: day, at: atNow, total: usTotal || usCount, chunked: true, chunks: chunkN, map: {} },
-    2
-  );
-  for (let ci = 0; ci < chunkN; ci++) {
-    const part = {};
-    const slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
-    for (let si = 0; si < slice.length; si++) {
-      part[slice[si]] = usMap[slice[si]];
+  // 质量门：本次拉得太少则不覆盖库里已有完整美股包
+  var prevUsIdx = await getCache('sector:us:quotes');
+  var prevUsN = 0;
+  if (prevUsIdx) {
+    prevUsN = Number(prevUsIdx.total) || 0;
+    if (!prevUsN && prevUsIdx.chunks) {
+      // 粗估：有分片就当作已有完整包
+      prevUsN = Number(prevUsIdx.chunks) * 2000;
     }
-    const piece = { day: day, at: atNow, map: part, chunk: ci, chunks: chunkN };
-    await putCache('sector:us:quotes:' + ci, piece, 2);
-    await putCache('sector:em_us_universe:' + ci, piece, 2);
+  }
+  var usSkipWrite = false;
+  if (usCount < 2000 && prevUsN >= 5000) {
+    usSkipWrite = true;
+    console.log('us skip write: new', usCount, 'prev~', prevUsN);
+  }
+
+  // 先写全部分片，再写索引（避免索引齐全、分片实际缺失）
+  if (!usSkipWrite) {
+    var usChunkFail = 0;
+    for (let ci = 0; ci < chunkN; ci++) {
+      const part = {};
+      const slice = allKeys.slice(ci * CHUNK, (ci + 1) * CHUNK);
+      for (let si = 0; si < slice.length; si++) {
+        part[slice[si]] = usMap[slice[si]];
+      }
+      const piece = {
+        day: day, at: atNow, map: part, chunk: ci, chunks: chunkN,
+        total: usTotal || usCount, source: 'cron', complete: true
+      };
+      try {
+        await putCache('sector:us:quotes:' + ci, piece, 2);
+        await putCache('sector:em_us_universe:' + ci, piece, 2);
+      } catch (eCh) {
+        usChunkFail++;
+        console.log('us chunk fail', ci, String(eCh));
+      }
+    }
+    if (usChunkFail > 0) {
+      usSkipWrite = true;
+      console.log('us skip index: chunk fails', usChunkFail);
+    } else {
+      await putCache(
+        'sector:us:quotes',
+        {
+          day: day, at: atNow, total: usTotal || usCount,
+          chunked: true, chunks: chunkN, map: {}, source: 'cron', complete: true
+        },
+        2
+      );
+      await putCache(
+        'sector:em_us_universe',
+        {
+          day: day, at: atNow, total: usTotal || usCount,
+          chunked: true, chunks: chunkN, map: {}, source: 'cron', complete: true
+        },
+        2
+      );
+    }
   }
 
   // ---- 美股归类：写入 em_class + 一级角标快照（打开网页可直接完整角标）----
   var classResult = { byL1: {}, byL2: {}, classN: 0, cards: [], sum: 0 };
   try {
-    classResult = classifyUSMapToSectors(usMap);
-    await putCache(
-      'sector:us:em_class',
-      {
-        day: day,
-        at: atNow,
-        byL1: classResult.byL1,
-        byL2: classResult.byL2,
-        classN: classResult.classN,
-        source: 'cron',
-      },
-      2
-    );
-    if (classResult.sum > 400 && classResult.cards && classResult.cards.length) {
+    if (!usSkipWrite) {
+      classResult = classifyUSMapToSectors(usMap);
       await putCache(
-        'sector:us:l1_snap',
+        'sector:us:em_class',
         {
           day: day,
           at: atNow,
-          cards: classResult.cards,
-          sum: classResult.sum,
+          byL1: classResult.byL1,
+          byL2: classResult.byL2,
+          classN: classResult.classN,
           source: 'cron',
         },
-        3
+        2
       );
+      if (classResult.sum > 400 && classResult.cards && classResult.cards.length) {
+        await putCache(
+          'sector:us:l1_snap',
+          {
+            day: day,
+            at: atNow,
+            cards: classResult.cards,
+            sum: classResult.sum,
+            source: 'cron',
+          },
+          3
+        );
+      }
     }
   } catch (eCls) {
     console.log('classify cron fail', String(eCls));
@@ -1125,7 +1202,7 @@ async function runSectorDailyJob(env) {
   async function fetchCnBoardMembers(boardCode) {
     const out = [];
     const pageSize = 100;
-    const maxPages = 5;
+    const maxPages = 20; // 最多约 2000 只，尽量接近全量刷新
     for (let pn = 1; pn <= maxPages; pn++) {
       const url =
         'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' +
@@ -1271,43 +1348,102 @@ async function runSectorDailyJob(env) {
   });
 
   const atCn = Date.now();
-  await putCache(
-    'sector:cn:boards',
-    {
-      day: day,
-      at: atCn,
-      boards: boards,
-      meta: cnMeta,
-      stocks: cnStocks,
-      byL2: cnByL2,
-      source: 'cron',
-    },
-    2
-  );
-  await putCache(
-    'sector:cn:em_class',
-    {
-      day: day,
-      at: atCn,
-      byL2: cnByL2,
-      meta: cnMeta,
-      classN: cnL1Sum,
-      source: 'cron',
-    },
-    2
-  );
-  if (cnL1Sum > 100) {
+  // 质量门：避免休市/失败时用「全 0% + 成分很少」覆盖用户全量刷新留下的完整包
+  var cnScore = scoreCNPackage(cnMeta, boards);
+  var prevCn = await getCache('sector:cn:boards');
+  var prevScore = prevCn ? scoreCNPackage(prevCn.meta || {}, prevCn.boards || []) : { stockN: 0, chgN: 0, boardN: 0 };
+  var cnSkipWrite = false;
+  // 新包涨跌几乎全 0，但旧包有真实涨跌 → 保留旧包（常见于周末 Cron）
+  if (cnScore.chgN <= 2 && prevScore.chgN >= 5) {
+    cnSkipWrite = true;
+    console.log('cn skip write: new chgN', cnScore.chgN, 'prev chgN', prevScore.chgN);
+  }
+  // 新包成分明显少很多（拉失败）也不覆盖
+  if (!cnSkipWrite && prevScore.stockN > 2000 && cnScore.stockN < prevScore.stockN * 0.5) {
+    cnSkipWrite = true;
+    console.log('cn skip write: new stockN', cnScore.stockN, 'prev', prevScore.stockN);
+  }
+  // 若新包成分更全但涨跌全 0、旧包有涨跌：合并——用新成分数 + 旧涨跌
+  if (!cnSkipWrite && cnScore.stockN >= prevScore.stockN && cnScore.chgN <= 2 && prevScore.chgN >= 5 && prevCn && prevCn.meta) {
+    Object.keys(cnMeta).forEach(function (bk) {
+      var oldM = prevCn.meta[bk];
+      if (!oldM) return;
+      var oc = Number(oldM.chg);
+      if (!isNaN(oc) && Math.abs(oc) > 0.001) {
+        if (!cnMeta[bk]) cnMeta[bk] = {};
+        cnMeta[bk].chg = oc;
+      }
+    });
+    boards.forEach(function (b) {
+      if (!b || !b.board) return;
+      var oldB = (prevCn.boards || []).find(function (x) { return x && x.board === b.board; });
+      if (oldB && Math.abs(Number(oldB.chg) || 0) > 0.001 && Math.abs(Number(b.chg) || 0) <= 0.001) {
+        b.chg = oldB.chg;
+      }
+    });
+    // 重算一级卡片涨跌
+    cnL1Cards.forEach(function (card) {
+      var sum = 0, n = 0, count = 0;
+      CN_BOARD_TREE.forEach(function (node) {
+        if (node.l1 !== card.id) return;
+        var m = cnMeta[node.board];
+        if (!m) return;
+        count += Number(m.count) || 0;
+        if (m.chg != null && !isNaN(m.chg) && Math.abs(m.chg) > 0.001) {
+          sum += m.chg;
+          n++;
+        }
+      });
+      card.count = count;
+      card.chg = n ? Math.round((sum / n) * 100) / 100 : card.chg;
+    });
+    cnL1Sum = 0;
+    cnL1Cards.forEach(function (c) { cnL1Sum += c.count; });
+    console.log('cn merged prev chg into fuller member counts');
+  }
+
+  if (!cnSkipWrite) {
     await putCache(
-      'sector:cn:l1_snap',
+      'sector:cn:boards',
       {
         day: day,
         at: atCn,
-        cards: cnL1Cards,
-        sum: cnL1Sum,
+        boards: boards,
+        meta: cnMeta,
+        stocks: cnStocks,
+        byL2: cnByL2,
+        source: 'cron',
+        quality: cnScore,
+      },
+      2
+    );
+    await putCache(
+      'sector:cn:em_class',
+      {
+        day: day,
+        at: atCn,
+        byL2: cnByL2,
+        meta: cnMeta,
+        classN: cnL1Sum,
         source: 'cron',
       },
-      3
+      2
     );
+    if (cnL1Sum > 100) {
+      await putCache(
+        'sector:cn:l1_snap',
+        {
+          day: day,
+          at: atCn,
+          cards: cnL1Cards,
+          sum: cnL1Sum,
+          source: 'cron',
+        },
+        3
+      );
+    }
+  } else {
+    console.log('cn write skipped to protect complete cache');
   }
 
   // 状态标记：网页可用来判断「今天是否已后台刷过」
