@@ -15759,7 +15759,6 @@ const FALLBACK_SECTORS = {
         } catch (eCl) {}
         var day = sectorLocalDayStr();
         var at = Date.now();
-        // 字段尽量短，降低 D1/Worker 体积限制导致整包失败
         var slim = {};
         keys.forEach(function (k) {
           var q = map[k];
@@ -15772,15 +15771,9 @@ const FALLBACK_SECTORS = {
         });
         var allKeys = Object.keys(slim);
         var n = allKeys.length;
-        var classPayload = {
-          day: day, at: at,
-          byL1: window.__usEmByL1 || {},
-          byL2: window.__usEmByL2 || {}
-        };
-        // 美股板块缓存只写 D1，不写 localStorage
+        if (n < 50) return { ok: false, reason: 'slim-too-small', n: n };
 
-
-        // 分片写入报价（每片约 2500 只），避免单 key 过大写失败
+        // 分片：先写完所有分片，再写索引（避免索引说齐全、分片实际缺）
         var CHUNK = 2500;
         var chunkN = Math.ceil(n / CHUNK) || 1;
         var chunkOk = 0;
@@ -15796,11 +15789,6 @@ const FALLBACK_SECTORS = {
           }, 2);
           if (okC) chunkOk++;
         }
-        // 索引：打开时按 chunks 拼回；并写一份精简总表兼容旧 Cron
-        var rIdx = await cloudCacheSet('sector:us:quotes', {
-          day: day, at: at, total: n, chunks: chunkN, source: reason || 'persist', chunked: true
-        }, 2);
-        // universe 也分片（同内容，key 不同给 hydrate 兼容）
         var uniOk = 0;
         for (var ui = 0; ui < chunkN; ui++) {
           var partU = {};
@@ -15809,35 +15797,53 @@ const FALLBACK_SECTORS = {
             partU[sliceU[uj]] = slim[sliceU[uj]];
           }
           var okU = await cloudCacheSet('sector:em_us_universe:' + ui, {
-            day: day, at: at, total: n, chunk: ui, chunks: chunkN, map: partU
+            day: day, at: at, total: n, chunk: ui, chunks: chunkN,
+            map: partU, source: reason || 'persist'
           }, 2);
           if (okU) uniOk++;
         }
-        await cloudCacheSet('sector:em_us_universe', {
-          day: day, at: at, total: n, chunks: chunkN, chunked: true, source: reason || 'persist'
+
+        var allChunksOk = (chunkOk === chunkN && uniOk === chunkN);
+        if (!allChunksOk) {
+          console.warn('[persistSectorCloudFull] chunks incomplete', chunkOk, uniOk, '/', chunkN);
+          return { ok: false, reason: 'chunks-incomplete', n: n, chunkOk: chunkOk, uniOk: uniOk, chunks: chunkN };
+        }
+
+        // 索引仅在全部分片成功后写入
+        var rIdx = await cloudCacheSet('sector:us:quotes', {
+          day: day, at: at, total: n, chunks: chunkN, chunked: true,
+          source: reason || 'persist', complete: true
+        }, 2);
+        var rUni = await cloudCacheSet('sector:em_us_universe', {
+          day: day, at: at, total: n, chunks: chunkN, chunked: true,
+          source: reason || 'persist', complete: true
         }, 2);
 
-        var payloadMeta = {
-          day: day, at: at, usCount: n, usTotal: n,
-          source: reason || 'persist',
-          chunks: chunkN, chunkOk: chunkOk,
-          emByL1: (function () {
-            var o = {}, src = window.__usEmByL1 || {};
-            Object.keys(src).forEach(function (id) { o[id] = (src[id] || []).length; });
-            return o;
-          })()
-        };
-        var r3 = await cloudCacheSet('sector:daily:meta', payloadMeta, 3);
-        var r4 = await cloudCacheSet('sector:us:em_class', classPayload, 2);
-        // 一级角标快照：重开网页可秒开完整数字，不依赖内存
-        var r5 = false;
+        // 归类完整写入
+        var classN = 0;
         try {
-          var snapCards = window.__usL1LastGoodCards || null;
-          var snapSum = 0;
+          var bl2 = window.__usEmByL2 || {};
+          Object.keys(bl2).forEach(function (k) { classN += (bl2[k] && bl2[k].length) || 0; });
+        } catch (eCn) {}
+        var classPayload = {
+          day: day, at: at,
+          byL1: window.__usEmByL1 || {},
+          byL2: window.__usEmByL2 || {},
+          classN: classN,
+          source: reason || 'persist',
+          complete: true
+        };
+        var r4 = await cloudCacheSet('sector:us:em_class', classPayload, 2);
+
+        // 一级角标快照
+        var r5 = false;
+        var snapCards = null;
+        var snapSum = 0;
+        try {
+          snapCards = window.__usL1LastGoodCards || null;
           if (snapCards && snapCards.length) {
             snapCards.forEach(function (c) { snapSum += Number(c.count || 0); });
           }
-          // 没有内存快照时，用当前归类现算一份角标
           if (!(snapSum > 1500) && typeof US_SECTOR_TREE !== 'undefined' && window.__usEmByL2) {
             snapCards = US_SECTOR_TREE.filter(function (l1) {
               return l1 && l1.id !== '__em_other_l1__' && l1.id !== '__em_other__';
@@ -15870,14 +15876,30 @@ const FALLBACK_SECTORS = {
           }
           if (snapCards && snapSum > 800) {
             r5 = await cloudCacheSet('sector:us:l1_snap', {
-              day: day, at: at, cards: snapCards, sum: snapSum, source: reason || 'persist'
+              day: day, at: at, cards: snapCards, sum: snapSum,
+              source: reason || 'persist', complete: true
             }, 3);
             window.__usL1LastGoodCards = snapCards;
             window.__usL1LastGoodDay = day;
           }
         } catch (eSnap) { console.warn('l1_snap', eSnap); }
-        console.log('[persistSectorCloudFull]', reason, n, 'chunks', chunkN, 'ok', chunkOk, rIdx, r3, r4, 'snap', r5);
-        return { ok: chunkOk > 0, n: n, chunkOk: chunkOk, chunks: chunkN, r3: r3, r4: r4, r5: r5 };
+
+        var payloadMeta = {
+          day: day, at: at, usCount: n, usTotal: n,
+          source: reason || 'persist',
+          chunks: chunkN, chunkOk: chunkOk, uniOk: uniOk,
+          classN: classN, complete: !!(rIdx && rUni && r4),
+          emByL1: (function () {
+            var o = {}, src = window.__usEmByL1 || {};
+            Object.keys(src).forEach(function (id) { o[id] = (src[id] || []).length; });
+            return o;
+          })()
+        };
+        var r3 = await cloudCacheSet('sector:daily:meta', payloadMeta, 3);
+
+        var okAll = !!(rIdx && rUni && chunkOk === chunkN);
+        console.log('[persistSectorCloudFull]', reason, n, 'chunks', chunkN, 'ok', okAll, 'class', r4, 'snap', r5);
+        return { ok: okAll, n: n, chunkOk: chunkOk, uniOk: uniOk, chunks: chunkN, rIdx: rIdx, rUni: rUni, r3: r3, r4: r4, r5: r5 };
       } catch (e) {
         console.warn('persistSectorCloudFull', e);
         return { ok: false, error: String(e) };
@@ -15904,26 +15926,46 @@ const FALLBACK_SECTORS = {
           }
         } catch (eB) {}
         var meta = {};
+        var stockTotal = 0;
+        var chgN = 0;
         try {
           Object.keys(window.__cnBoardMeta || {}).forEach(function (bk) {
             var m = window.__cnBoardMeta[bk];
             if (!m) return;
-            meta[bk] = { count: m.count, name: m.name, chg: m.chg };
+            meta[bk] = {
+              count: m.count, name: m.name, chg: m.chg,
+              l1: m.l1 || '', l2: m.l2 || m.id || ''
+            };
+            stockTotal += Number(m.count) || 0;
+            if (m.chg != null && !isNaN(Number(m.chg)) && Math.abs(Number(m.chg)) > 0.001) chgN++;
           });
         } catch (eM) {}
         var stocks = {};
+        var byL2 = {};
         try {
           var sc = window.__cnBoardStocksCache || {};
           Object.keys(sc).forEach(function (bk) {
             var arr = sc[bk];
             if (!Array.isArray(arr) || !arr.length) return;
-            stocks[bk] = arr.slice(0, 400).map(function (s) {
+            stocks[bk] = arr.slice(0, 1500).map(function (s) {
               if (typeof s === 'string') return s;
               return { code: s.code || s.symbol || '', name: s.name || '', chg: s.chg, price: s.price };
             });
+            byL2[bk] = stocks[bk].map(function (s) {
+              return typeof s === 'string' ? s : (s.code || '');
+            }).filter(Boolean);
           });
         } catch (eS) {}
-        var payload = { day: day, at: at, source: reason || 'persist-cn', boards: boards, meta: meta, stocks: stocks };
+        // 太空不写库，避免覆盖完整包
+        if (Object.keys(meta).length < 5 && boards.length < 5) {
+          return { ok: false, reason: 'too-empty' };
+        }
+        var payload = {
+          day: day, at: at, source: reason || 'persist-cn',
+          boards: boards, meta: meta, stocks: stocks, byL2: byL2,
+          quality: { stockN: stockTotal, chgN: chgN, boardN: Object.keys(meta).length },
+          complete: true
+        };
         try {
           localStorage.setItem('sector:cn_boards_local', JSON.stringify(payload));
         } catch (eLoc) {
@@ -15934,17 +15976,57 @@ const FALLBACK_SECTORS = {
           } catch (e2) {}
         }
         var ok = false;
+        var rClass = false;
+        var rSnap = false;
         if (typeof cloudCacheSet === 'function') {
           ok = await cloudCacheSet('sector:cn:boards', payload, 2);
           try {
+            rClass = await cloudCacheSet('sector:cn:em_class', {
+              day: day, at: at, byL2: byL2, meta: meta,
+              classN: stockTotal, source: reason || 'persist-cn', complete: true
+            }, 2);
+          } catch (eCl) {}
+          try {
+            // 一级快照（有 CN_SECTOR_TREE 时）
+            if (typeof CN_SECTOR_TREE !== 'undefined' && CN_SECTOR_TREE.length) {
+              var cards = CN_SECTOR_TREE.map(function (l1) {
+                var count = 0, sum = 0, n = 0;
+                (l1.children || []).forEach(function (c) {
+                  var bk = c.board;
+                  var m = bk && meta[bk];
+                  if (!m) return;
+                  count += Number(m.count) || 0;
+                  if (m.chg != null && !isNaN(Number(m.chg))) {
+                    sum += Number(m.chg);
+                    n++;
+                  }
+                });
+                return {
+                  id: l1.id, name: l1.name, en: l1.en,
+                  chg: n ? Math.round((sum / n) * 100) / 100 : 0,
+                  count: count, subCount: (l1.children || []).length, _pending: false
+                };
+              });
+              var sumC = 0;
+              cards.forEach(function (c) { sumC += c.count; });
+              if (sumC > 100) {
+                rSnap = await cloudCacheSet('sector:cn:l1_snap', {
+                  day: day, at: at, cards: cards, sum: sumC,
+                  source: reason || 'persist-cn', complete: true
+                }, 3);
+              }
+            }
+          } catch (eSnap) {}
+          try {
             await cloudCacheSet('sector:daily:meta:cn', {
               day: day, at: at, boardN: boards.length,
-              metaN: Object.keys(meta).length, source: reason || 'persist-cn'
+              metaN: Object.keys(meta).length, stockN: stockTotal, chgN: chgN,
+              source: reason || 'persist-cn', complete: !!ok
             }, 3);
           } catch (eM2) {}
         }
-        console.log('[persistSectorCloudCN]', reason, boards.length, Object.keys(meta).length, ok);
-        return { ok: ok, boardN: boards.length };
+        console.log('[persistSectorCloudCN]', reason, boards.length, Object.keys(meta).length, stockTotal, ok, rClass, rSnap);
+        return { ok: ok, boardN: boards.length, stockN: stockTotal, rClass: rClass, rSnap: rSnap };
       } catch (e) {
         console.warn('persistSectorCloudCN', e);
         return { ok: false, error: String(e) };
