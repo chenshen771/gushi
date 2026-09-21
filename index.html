@@ -15264,8 +15264,10 @@ const FALLBACK_SECTORS = {
                       _at: Date.now()
                     };
                   }
-                  const expect = boardTotals[item.board] || stocks.length || 0;
-                  stockLoaded += expect;
+                  // 按真实拉到的数量累加，空结果不虚增进度
+                  const got = stocks.length || 0;
+                  stockLoaded += got;
+                  if (got && boardTotals) boardTotals[item.board] = got;
                   boardsDone++;
                 } catch (e) {
                   console.warn('cn full board', item.board, e);
@@ -15665,16 +15667,13 @@ const FALLBACK_SECTORS = {
               if (wrapC.data.byL1) window.__usEmByL1 = wrapC.data.byL1;
               if (wrapC.data.byL2) window.__usEmByL2 = wrapC.data.byL2;
               window.__usEmClassifiedAt = wrapC.data.at || Date.now();
-              // 归类过稀视为无效，强制后续 open-fill
+              // 归类偏少时仍保留，供角标使用；仅打标，等完整东财表后再重算
               try {
                 var _nCl = 0;
                 var _bl2 = window.__usEmByL2 || {};
                 Object.keys(_bl2).forEach(function (k) { _nCl += (_bl2[k] && _bl2[k].length) || 0; });
-                if (_nCl < 400) {
-                  window.__usEmByL2 = {};
-                  window.__usEmByL1 = {};
-                  window.__usEmClassifiedAt = 0;
-                }
+                window.__usEmClassThin = _nCl < 400;
+                // 不再清空 byL1/byL2，避免一打开只剩树内小数
               } catch (eThin) {}
             }
           } catch (eCl) {}
@@ -15687,9 +15686,10 @@ const FALLBACK_SECTORS = {
               if (!wrapS.data.day || !today || wrapS.data.day === today) {
                 var sumS = Number(wrapS.data.sum) || 0;
                 if (!sumS) wrapS.data.cards.forEach(function (c) { sumS += Number(c.count || 0); });
-                if (sumS > 800) {
+                // 有像样角标就留下（不要求必须 >800，隔天也能用上一次完整刷新）
+                if (sumS > 400) {
                   window.__usL1LastGoodCards = wrapS.data.cards;
-                  window.__usL1LastGoodDay = wrapS.data.day || today;
+                  window.__usL1LastGoodDay = wrapS.data.day || today || window.__usL1LastGoodDay;
                 }
               }
             }
@@ -15874,7 +15874,7 @@ const FALLBACK_SECTORS = {
             snapSum = 0;
             snapCards.forEach(function (c) { snapSum += Number(c.count || 0); });
           }
-          if (snapCards && snapSum > 800) {
+          if (snapCards && snapSum > 400) {
             r5 = await cloudCacheSet('sector:us:l1_snap', {
               day: day, at: at, cards: snapCards, sum: snapSum,
               source: reason || 'persist', complete: true
@@ -16077,10 +16077,15 @@ const FALLBACK_SECTORS = {
 
     async function fetchEMUSPage(pn, pz) {
       pz = pz || 100;
-      var url = 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' + pn +
+      var path = '/api/qt/clist/get?pn=' + pn +
         '&pz=' + pz + '&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:105,m:106,m:107' +
         '&fields=f12,f13,f14,f2,f3,f4,f15,f16,f17,f18,f100&_=' + Date.now();
-      var data = null;
+      var hosts = [
+        'https://push2delay.eastmoney.com',
+        'https://push2.eastmoney.com',
+        'https://82.push2.eastmoney.com',
+        'https://79.push2.eastmoney.com'
+      ];
       function withTimeout(promise, ms) {
         return new Promise(function (resolve) {
           var done = false;
@@ -16088,7 +16093,7 @@ const FALLBACK_SECTORS = {
             if (done) return;
             done = true;
             resolve(null);
-          }, ms || 8000);
+          }, ms || 12000);
           Promise.resolve(promise).then(function (v) {
             if (done) return;
             done = true;
@@ -16102,21 +16107,30 @@ const FALLBACK_SECTORS = {
           });
         });
       }
-      try {
-        if (typeof fetchViaProxies === 'function') {
-          data = await withTimeout(fetchViaProxies(url), 8000);
-        }
-      } catch (e1) { data = null; }
-      if (!data) {
+      for (var hi = 0; hi < hosts.length; hi++) {
+        var url = hosts[hi] + path;
+        var data = null;
         try {
-          data = await withTimeout((async function () {
-            var res = await fetch(url, { cache: 'no-store', mode: 'cors' });
-            if (res && res.ok) return await res.json();
-            return null;
-          })(), 8000);
-        } catch (e2) { data = null; }
+          if (typeof fetchViaProxies === 'function') {
+            data = await withTimeout(fetchViaProxies(url), 12000);
+          }
+        } catch (e1) { data = null; }
+        if (!data) {
+          try {
+            data = await withTimeout((async function () {
+              var u = url;
+              if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+                u = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(url);
+              }
+              var res = await fetch(u, { cache: 'no-store', mode: 'cors' });
+              if (res && res.ok) return await res.json();
+              return null;
+            })(), 12000);
+          } catch (e2) { data = null; }
+        }
+        if (data && data.data && (data.data.diff || data.data.total != null)) return data;
       }
-      return data;
+      return null;
     }
 
     /** 全量拉取东财美股列表写入 __emUSMap；force 忽略 TTL */
@@ -16160,7 +16174,9 @@ const FALLBACK_SECTORS = {
             var wrap = await cloudCacheGet('sector:em_us_universe');
             if (wrap && wrap.data && wrap.data.map && typeof wrap.data.map === 'object') {
               var keys0 = Object.keys(wrap.data.map);
-              if (keys0.length > 500) {
+              // 索引包常无 map 或 map 很小（分片模式）；只有真·单包全表才 early-return
+              // 避免把「空 map 的索引」当成全市场缓存
+              if (keys0.length > 3000 && !wrap.data.chunked) {
                 window.__emUSMap = wrap.data.map;
                 window.__emUSMapAt = wrap.data.at || Date.now();
                 window.__emUSMapTotal = wrap.data.total || keys0.length;
@@ -16900,6 +16916,27 @@ const FALLBACK_SECTORS = {
       Object.keys(byL1).forEach(function (id) { byL1[id] = dedupe(byL1[id]); });
       Object.keys(byL2).forEach(function (id) { byL2[id] = dedupe(byL2[id]); });
       other = dedupe(other);
+      // 把树内成分也并入 byL1/byL2，角标=树内+东财归类，不再漏掉树内名单
+      try {
+        if (typeof US_SECTOR_TREE !== 'undefined') {
+          US_SECTOR_TREE.forEach(function (l1) {
+            if (!l1 || !l1.id || l1.id.indexOf('__em_') === 0) return;
+            byL1[l1.id] = byL1[l1.id] || [];
+            (l1.children || []).forEach(function (c) {
+              if (!c) return;
+              byL2[c.id] = byL2[c.id] || [];
+              (c.stocks || []).forEach(function (s) {
+                var sym = String(s || '').toUpperCase().trim();
+                if (!sym) return;
+                byL1[l1.id].push(sym);
+                byL2[c.id].push(sym);
+              });
+            });
+            byL1[l1.id] = dedupe(byL1[l1.id]);
+          });
+          Object.keys(byL2).forEach(function (id) { byL2[id] = dedupe(byL2[id]); });
+        }
+      } catch (eTree) {}
       window.__usEmByL1 = byL1;
       window.__usEmByL2 = byL2;
       window.__usEmOther = other;
@@ -17152,6 +17189,21 @@ const FALLBACK_SECTORS = {
           all = all.concat(merged);
         });
         all = Array.from(new Set(all));
+        // 归类表里该大类股票数若更大，用更大值（避免只统计树内名单）
+        try {
+          var emL1 = (window.__usEmByL1 && window.__usEmByL1[l1.id]) ? window.__usEmByL1[l1.id] : [];
+          if (emL1 && emL1.length) {
+            var seen2 = {};
+            all.forEach(function (s) { seen2[String(s).toUpperCase()] = true; });
+            emL1.forEach(function (s) {
+              var k = String(s || '').toUpperCase();
+              if (!k || seen2[k]) return;
+              seen2[k] = true;
+              all.push(k);
+            });
+            if (all.length > countSum) countSum = all.length;
+          }
+        } catch (eEmC) {}
         var cacheAvg = { chg: 0, n: 0 };
         try {
           var sum = 0, nn = 0;
@@ -17191,16 +17243,18 @@ const FALLBACK_SECTORS = {
         var snap = window.__usL1LastGoodCards;
         var sumSnap = 0;
         if (snap && snap.length) snap.forEach(function (c) { sumSnap += Number(c.count || 0); });
-        if (sumSnap > 800 && sumNow > 0 && sumNow < sumSnap * 0.55) {
+        // 快照明显更完整就用快照角标（不限 0.55，只要更大就合入 count）
+        if (sumSnap > 400 && (sumNow < 1 || sumNow < sumSnap * 0.92)) {
           var byId = {};
           snap.forEach(function (c) { if (c && c.id) byId[c.id] = c; });
           baseCards = baseCards.map(function (c) {
             var s = byId[c.id];
             if (!s) return c;
+            var useCnt = Math.max(Number(c.count) || 0, Number(s.count) || 0);
             return {
               id: c.id, name: c.name, en: c.en,
               chg: (c._pending && s.chg != null) ? s.chg : c.chg,
-              count: s.count, subCount: c.subCount, _l1: c._l1,
+              count: useCnt, subCount: c.subCount, _l1: c._l1,
               _pending: c._pending
             };
           });
@@ -20684,21 +20738,24 @@ function normalizeAShareCode(sym) {
 
     // ==================== 宏观数据（多源备用） ====================
     async function fetchViaProxies(url) {
-      const proxies = [
-        WORKER_BASE + '?url=' + encodeURIComponent(url),
-        url,
-        'https://corsproxy.io/?' + encodeURIComponent(url),
-        'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
-      ];
+      const base = (typeof WORKER_BASE !== 'undefined' && WORKER_BASE)
+        ? WORKER_BASE.replace(/\?.*$/, '') : '';
+      const proxies = [];
+      if (base) proxies.push(base + '?url=' + encodeURIComponent(url));
+      proxies.push(url);
+      proxies.push('https://corsproxy.io/?' + encodeURIComponent(url));
+      proxies.push('https://api.allorigins.win/raw?url=' + encodeURIComponent(url));
       for (const u of proxies) {
         try {
-          const res = await fetch(u, { signal: AbortSignal.timeout(8000) });
+          const res = await fetch(u, { signal: AbortSignal.timeout(12000), cache: 'no-store' });
           if (!res.ok) continue;
           let data = await res.json();
           if (data && data.contents) {
             try { data = JSON.parse(data.contents); } catch(e) {}
           }
-          return data;
+          // 有效东财包才返回，避免代理错误 JSON 当成功
+          if (data && (data.data || data.chart || data.quoteResponse || data.result)) return data;
+          if (data && data.rc === 0) return data;
         } catch (e) {
           console.warn('proxy fail', e);
         }
