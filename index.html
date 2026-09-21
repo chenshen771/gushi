@@ -15088,19 +15088,28 @@ const FALLBACK_SECTORS = {
           async function fetchAllBoardStocks(board) {
             const stocks = [];
             async function fetchBoardPage(pn) {
-              const url = 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' + pn +
+              var hosts = [
+                'https://push2delay.eastmoney.com',
+                'https://push2.eastmoney.com',
+                'https://82.push2.eastmoney.com',
+                'https://79.push2.eastmoney.com'
+              ];
+              var path = '/api/qt/clist/get?pn=' + pn +
                 '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + board +
                 '&fields=f12,f14,f2,f3&_=' + Date.now();
-              const proxies = [];
-              if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-                proxies.push(WORKER_BASE + '?url=' + encodeURIComponent(url));
-              }
-              proxies.push(url);
-              for (let pi = 0; pi < proxies.length; pi++) {
+              var urls = [];
+              hosts.forEach(function (h) {
+                var u = h + path;
+                if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+                  urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
+                }
+                urls.push(u);
+              });
+              for (let pi = 0; pi < urls.length; pi++) {
                 try {
                   const res = await (typeof fetchWithTimeoutSimple === 'function'
-                    ? fetchWithTimeoutSimple(proxies[pi], 6000)
-                    : fetch(proxies[pi]));
+                    ? fetchWithTimeoutSimple(urls[pi], 12000)
+                    : fetch(urls[pi]));
                   if (!res || !res.ok) continue;
                   let data = await res.json();
                   if (data && data.contents) {
@@ -15240,8 +15249,13 @@ const FALLBACK_SECTORS = {
                   try {
                     if (window.__cnBoardMeta) delete window.__cnBoardMeta[item.board];
                   } catch (e0) {}
-                  const pack = await fetchAllBoardStocks(item.board);
-                  const stocks = (pack && pack.stocks) || [];
+                  var pack = await fetchAllBoardStocks(item.board);
+                  var stocks = (pack && pack.stocks) || [];
+                  if (!stocks.length) {
+                    await new Promise(function (r) { setTimeout(r, 500); });
+                    pack = await fetchAllBoardStocks(item.board);
+                    stocks = (pack && pack.stocks) || [];
+                  }
                   window.__cnBoardStocksCache = window.__cnBoardStocksCache || {};
                   window.__cnBoardStocksCache[item.board] = {
                     list: stocks,
@@ -16303,7 +16317,7 @@ const FALLBACK_SECTORS = {
         var sessionGot = ingestDiff(diff0) || 0;
         var pageSize = 100;
         var pages = Math.max(1, Math.ceil(total / pageSize));
-        var CONC = 5;
+        var CONC = 4;
         var deadline = Date.now() + 75 * 1000; // 整次最多 75 秒，防止永远卡在 89%
         var stagnant = 0;
         var lastSessionGot = sessionGot;
@@ -18617,42 +18631,51 @@ async function openCNSectorStocks(boardCode, sectorName, isRestore) {
           }
         } catch (e) {}
         async function fetchBoardPage(pn) {
-          const url = 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' + pn + '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + boardCode + '&fields=f12,f14,f2,f3&_=' + Date.now();
-          const proxies = [];
-          if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-            proxies.push(WORKER_BASE + '?url=' + encodeURIComponent(url));
-          }
-          proxies.push(url);
-          for (let i = 0; i < proxies.length; i++) {
-            try {
-              const res = await (typeof fetchWithTimeoutSimple === 'function'
-                ? fetchWithTimeoutSimple(proxies[i], 6000)
-                : fetch(proxies[i]));
-              if (!res || !res.ok) continue;
-              let data = await res.json();
-              if (data && data.contents) {
-                try { data = JSON.parse(data.contents); } catch (e) {}
-              }
-              const diff = data && data.data && data.data.diff;
-              if (Array.isArray(diff) && diff.length) {
-                return {
-                  list: diff.map(function (it) {
+              var hosts = [
+                'https://push2delay.eastmoney.com',
+                'https://push2.eastmoney.com',
+                'https://82.push2.eastmoney.com',
+                'https://79.push2.eastmoney.com'
+              ];
+              var path = '/api/qt/clist/get?pn=' + pn +
+                '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + boardCode +
+                '&fields=f12,f14,f2,f3&_=' + Date.now();
+              var urls = [];
+              hosts.forEach(function (h) {
+                var u = h + path;
+                if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+                  urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
+                }
+                urls.push(u);
+              });
+              for (let pi = 0; pi < urls.length; pi++) {
+                try {
+                  const res = await (typeof fetchWithTimeoutSimple === 'function'
+                    ? fetchWithTimeoutSimple(urls[pi], 12000)
+                    : fetch(urls[pi]));
+                  if (!res || !res.ok) continue;
+                  let data = await res.json();
+                  if (data && data.contents) {
+                    try { data = JSON.parse(data.contents); } catch (e) {}
+                  }
+                  const diff = data && data.data && data.data.diff;
+                  if (Array.isArray(diff) && diff.length) {
                     return {
-                      code: String(it.f12 || ''),
-                      name: it.f14 || '',
-                      price: it.f2 != null ? Number(it.f2) : null,
-                      chg: it.f3 != null ? Number(it.f3) : null
+                      list: diff.map(function (it) {
+                        return {
+                          code: String(it.f12 || ''),
+                          name: it.f14 || '',
+                          price: it.f2 != null ? Number(it.f2) : null,
+                          chg: it.f3 != null ? Number(it.f3) : null
+                        };
+                      }).filter(function (x) { return x.code; }),
+                      total: (data.data && data.data.total) || diff.length
                     };
-                  }).filter(function (x) { return x.code; }),
-                  total: (data.data && data.data.total) || diff.length
-                };
+                  }
+                } catch (e) {}
               }
-            } catch (e) {
-              console.warn('cn board page fail', pn, e && e.message);
+              return null;
             }
-          }
-          return null;
-        }
         // 多页拉取，尽量拉全（已有全量缓存则跳过）
         let totalHint = 0;
         if (!stocks.length) for (let page = 1; page <= 30; page++) {
