@@ -132,6 +132,11 @@ export default {
       'finnhub.io',
       'www.federalreserve.gov',
       'federalreserve.gov',
+      'hq.sinajs.cn',
+      'sinajs.cn',
+      'qt.gtimg.cn',
+      'web.ifzq.gtimg.cn',
+      'proxy.finance.qq.com',
     ];
     if (
       !allow.some(
