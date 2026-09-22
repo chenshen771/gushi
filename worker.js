@@ -147,13 +147,24 @@ export default {
     }
 
     try {
-      const res = await fetch(target, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept: 'application/json,text/plain,*/*',
-        },
-      });
+      const hdrs = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'application/json,text/plain,*/*',
+      };
+      // 新浪/腾讯行情直连常要 Referer，否则空包
+      if (parsed.hostname === 'hq.sinajs.cn' || parsed.hostname.endsWith('.sinajs.cn')) {
+        hdrs.Referer = 'https://finance.sina.com.cn/';
+        hdrs.Accept = '*/*';
+      } else if (
+        parsed.hostname === 'qt.gtimg.cn' ||
+        parsed.hostname === 'web.ifzq.gtimg.cn' ||
+        parsed.hostname.endsWith('.gtimg.cn')
+      ) {
+        hdrs.Referer = 'https://finance.qq.com/';
+        hdrs.Accept = '*/*';
+      }
+      const res = await fetch(target, { headers: hdrs });
       const body = await res.text();
       return new Response(body, {
         status: res.status,
