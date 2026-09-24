@@ -165,13 +165,35 @@ export default {
         hdrs.Accept = '*/*';
       }
       const res = await fetch(target, { headers: hdrs });
-      const body = await res.text();
+      // 新浪/腾讯行情是 GBK；用 UTF-8 读会把中文名变成乱码
+      const host = parsed.hostname || '';
+      const isGbkHost =
+        host === 'hq.sinajs.cn' ||
+        host.endsWith('.sinajs.cn') ||
+        host === 'qt.gtimg.cn' ||
+        host === 'web.ifzq.gtimg.cn' ||
+        host.endsWith('.gtimg.cn');
+      let body;
+      if (isGbkHost) {
+        const buf = await res.arrayBuffer();
+        try {
+          body = new TextDecoder('gb18030').decode(buf);
+        } catch (e1) {
+          try {
+            body = new TextDecoder('gbk').decode(buf);
+          } catch (e2) {
+            body = new TextDecoder('utf-8').decode(buf);
+          }
+        }
+      } else {
+        body = await res.text();
+      }
       return new Response(body, {
         status: res.status,
         headers: {
-          'Content-Type':
-            res.headers.get('Content-Type') ||
-            'application/json; charset=utf-8',
+          'Content-Type': isGbkHost
+            ? 'text/plain; charset=utf-8'
+            : (res.headers.get('Content-Type') || 'application/json; charset=utf-8'),
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'public, max-age=30',
         },
