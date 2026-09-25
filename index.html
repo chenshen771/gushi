@@ -1591,6 +1591,7 @@
       right: 10px;
       z-index: 120;
       width: min(300px, 86vw);
+      max-height: min(520px, 72vh);
       background: rgba(15, 22, 32, 0.98);
       border: 1px solid var(--border);
       border-radius: 14px;
@@ -1598,11 +1599,31 @@
       backdrop-filter: blur(12px);
       padding: 12px 12px 10px;
       pointer-events: auto;
+      flex-direction: column;
+      overflow: hidden;
     }
-    .net-panel.show { display: block; }
+    .net-panel.show { display: flex; }
     .net-panel .np-hd {
       display: flex; justify-content: space-between; align-items: center;
       margin-bottom: 10px; padding: 0 2px;
+      flex-shrink: 0;
+    }
+    .net-panel #netPanelBody {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      padding-right: 2px;
+      max-height: min(400px, 58vh);
+    }
+    .net-panel #netPanelBody::-webkit-scrollbar {
+      width: 4px;
+    }
+    .net-panel #netPanelBody::-webkit-scrollbar-thumb {
+      background: rgba(120,140,160,0.45);
+      border-radius: 4px;
     }
     .net-panel .np-title { font-size: 0.82rem; font-weight: 700; color: var(--text); }
     .net-panel .np-refresh {
@@ -1615,15 +1636,24 @@
     .net-panel .np-refresh:active { opacity: 0.8; }
     .net-panel .np-row {
       display: flex; align-items: center; justify-content: space-between;
-      gap: 10px; padding: 9px 8px;
+      gap: 8px; padding: 9px 8px;
       border-radius: 10px;
       border: 1px solid rgba(42,53,68,0.7);
       background: rgba(21,27,36,0.9);
       margin-bottom: 7px;
     }
     .net-panel .np-row:last-child { margin-bottom: 0; }
+    .net-panel .np-left { flex: 1; min-width: 0; }
     .net-panel .np-name { font-size: 0.78rem; font-weight: 600; color: var(--text); }
     .net-panel .np-desc { font-size: 0.65rem; color: var(--muted); margin-top: 2px; line-height: 1.3; }
+    .net-panel .np-tag {
+      flex-shrink: 0; font-size: 0.72rem; font-weight: 700;
+      min-width: 2.6em; text-align: center; padding: 2px 0;
+    }
+    .net-panel .np-tag.ok { color: var(--green); }
+    .net-panel .np-tag.mid { color: var(--orange); }
+    .net-panel .np-tag.bad { color: var(--red); }
+    .net-panel .np-tag.pending { color: var(--muted); font-weight: 500; }
     .net-panel .np-ms {
       font-family: var(--font-num); font-size: 0.85rem; font-weight: 700;
       flex-shrink: 0; min-width: 4.2em; text-align: right;
@@ -1635,6 +1665,7 @@
     .net-panel .np-foot {
       margin-top: 8px; font-size: 0.65rem; color: var(--muted);
       line-height: 1.4; padding: 0 2px;
+      flex-shrink: 0;
     }
     /* header-actions 保持原 absolute 右上角；自身已是定位上下文，面板可向下展开 */
     .app-header { position: relative; padding-right: 224px; }
@@ -2007,7 +2038,11 @@
       <span>板块动态</span>
       <div style="display:flex;align-items:center;gap:10px;">
         <span id="sectorLiveStatus" style="font-size:0.72rem;font-family:var(--font-num);color:var(--muted);white-space:nowrap;">○ 待更新</span>
-        <button class="refresh-btn" onclick="onSectorRefreshClick()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 10px;font-size:0.75rem;cursor:pointer;">刷新</button>
+        <div id="sectorRouteWrap" style="position:relative;display:inline-block;">
+          <button type="button" class="refresh-btn" id="sectorRouteBtn" onclick="toggleSectorRouteMenu(event)" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 8px;font-size:0.72rem;cursor:pointer;">线路 ▾</button>
+          <div id="sectorRouteMenu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:50;min-width:168px;background:rgba(15,22,32,0.98);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.45);overflow:hidden;padding:4px 0;"></div>
+        </div>
+        <button type="button" class="refresh-btn" onclick="onSectorRefreshClick()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 10px;font-size:0.75rem;cursor:pointer;">刷新</button>
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:14px;">
@@ -2028,7 +2063,7 @@
       <button type="button" class="np-refresh" id="netPanelRefresh">刷新</button>
     </div>
     <div id="netPanelBody"></div>
-    <div class="np-foot">取各接口最近一次探测；摘要取可用中的最低延迟。点空白处关闭。</div>
+    <div class="np-foot">探测延迟并检查是否有有效数据：在线=有数据；502/无数据/超时=异常。摘要取在线接口最低延迟。点空白处关闭。</div>
   </div>
 
   <!-- 权重模型切换（二级小窗口） -->
@@ -2694,14 +2729,15 @@
       if (typeof usSectorView !== 'undefined' && usSectorView && usSectorView !== 'l1') return;
       // 优先用稳定快照，避免后台软刷把涨跌算成另一套
       try {
-        if (window.__usL1LastGoodCards && window.__usL1LastGoodCards.length && typeof paintUSSectorL1Cards === 'function') {
+        var emTree = !(typeof usesEmSectorTree === 'function') || usesEmSectorTree('us');
+        if (emTree && window.__usL1LastGoodCards && window.__usL1LastGoodCards.length && typeof paintUSSectorL1Cards === 'function') {
           paintUSSectorL1Cards(window.__usL1LastGoodCards, false);
           return;
         }
       } catch (eSnap) {}
       try {
-        // 已有 Cron 完整归类时不要重算，否则角标会掉
-        if (Object.keys(window.__emUSMap || {}).length > 200 && typeof classifyEmUSIntoSectors === 'function') {
+        if ((typeof usesEmSectorTree !== 'function' || usesEmSectorTree('us')) &&
+            Object.keys(window.__emUSMap || {}).length > 200 && typeof classifyEmUSIntoSectors === 'function') {
           if (!usEmClassIsRich()) classifyEmUSIntoSectors();
         }
       } catch (e0) {}
@@ -14599,12 +14635,111 @@ const FALLBACK_SECTORS = {
       }
       return el;
     }
+    function armSectorRefreshSlowHint(mkt, tok) {
+      mkt = mkt === 'cn' ? 'cn' : 'us';
+      try {
+        if (window.__sectorSlowHintTimer) {
+          clearTimeout(window.__sectorSlowHintTimer);
+          window.__sectorSlowHintTimer = null;
+        }
+        if (window.__sectorStallTimer) {
+          clearInterval(window.__sectorStallTimer);
+          window.__sectorStallTimer = null;
+        }
+      } catch (eClr) {}
+      window.__sectorSlowHintShown = window.__sectorSlowHintShown || { us: false, cn: false };
+      window.__sectorSlowHintShown[mkt] = false;
+      window.__sectorSlowHintTok = window.__sectorSlowHintTok || { us: 0, cn: 0 };
+      window.__sectorSlowHintTok[mkt] = tok;
+      window.__sectorSlowHintAt = Date.now();
+      window.__sectorProgTrack = window.__sectorProgTrack || { us: {}, cn: {} };
+      window.__sectorProgTrack[mkt] = { lastLoaded: 0, lastChangeAt: Date.now(), total: 0, lastLabel: '' };
+      var STALL_MS = 20000;
+      window.__sectorStallTimer = setInterval(function () {
+        try {
+          if (!window.__sectorSlowHintTok || window.__sectorSlowHintTok[mkt] !== (window.__sectorRefreshTok && window.__sectorRefreshTok[mkt])) return;
+          if (!window.__sectorRefreshBusy || !window.__sectorRefreshBusy[mkt]) return;
+          if (window.__sectorSlowHintShown[mkt]) return;
+          var st = window.__sectorProgressByMkt && window.__sectorProgressByMkt[mkt];
+          var loaded = st && st.loaded != null ? Number(st.loaded) : 0;
+          var total = st && st.total != null ? Number(st.total) : 0;
+          var pct = total > 0 ? (loaded / total) * 100 : loaded;
+          if (pct >= 90 || loaded >= 90) return;
+          var tr = window.__sectorProgTrack && window.__sectorProgTrack[mkt];
+          var lastAt = tr && tr.lastChangeAt ? tr.lastChangeAt : window.__sectorSlowHintAt;
+          if (!lastAt) lastAt = Date.now();
+          if (Date.now() - lastAt < STALL_MS) return;
+          window.__sectorSlowHintShown[mkt] = true;
+          failSectorRefreshNoData(mkt, 'stall-20s');
+        } catch (eSt) {}
+      }, 2000);
+    }
+    function failSectorRefreshNoData(mkt, reason) {
+      mkt = mkt === 'cn' ? 'cn' : 'us';
+      try {
+        if (typeof cancelSectorRefresh === 'function') cancelSectorRefresh(mkt);
+      } catch (eCan) {}
+      try {
+        if (typeof hideSectorProgress === 'function') hideSectorProgress(mkt);
+      } catch (eHide) {}
+      try {
+        if (window.__sectorStallTimer) {
+          clearInterval(window.__sectorStallTimer);
+          window.__sectorStallTimer = null;
+        }
+      } catch (e0) {}
+      var msg = '已自动取消：当前网络或接口异常，请稍后再试';
+      if (mkt === 'us') {
+        msg = '已自动取消：接口异常。可点「线路」切换后重试';
+      }
+      if (typeof setSectorToast === 'function') {
+        setSectorToast(true, msg, 8000);
+      } else {
+        try { console.info(msg, reason); } catch (e1) {}
+      }
+    }
+    function cycleSectorUSRoute() {
+      var mkt = getSectorRouteMkt() === 'cn' ? 'cn' : 'us';
+      var max = getSectorRouteMax(mkt) + 1;
+      var n = (getSectorRoute() + 1) % max;
+      setSectorRoute(n);
+      if (typeof updateSectorRouteBtnLabel === 'function') updateSectorRouteBtnLabel();
+      return n;
+    }
+    
+function clearSectorRefreshSlowHint() {
+      try {
+        if (window.__sectorSlowHintTimer) {
+          clearTimeout(window.__sectorSlowHintTimer);
+          window.__sectorSlowHintTimer = null;
+        }
+        if (window.__sectorStallTimer) {
+          clearInterval(window.__sectorStallTimer);
+          window.__sectorStallTimer = null;
+        }
+      } catch (e) {}
+    }
+
     function showSectorProgress(mkt, loaded, total, label) {
       mkt = mkt === 'cn' ? 'cn' : 'us';
       // 已取消：进行中的批次回调不得再把进度条唤起来
       try {
         if (!window.__sectorRefreshBusy || !window.__sectorRefreshBusy[mkt]) return;
       } catch (eBusy) { return; }
+      try {
+        var _ld = Number(loaded) || 0;
+        window.__sectorProgTrack = window.__sectorProgTrack || { us: {}, cn: {} };
+        var tr = window.__sectorProgTrack[mkt] || {};
+        var prev = tr.lastLoaded;
+        var lab0 = label != null ? String(label) : '';
+        if (prev == null || _ld !== prev || tr.lastLabel !== lab0) {
+          tr.lastLoaded = _ld;
+          tr.lastLabel = lab0;
+          tr.lastChangeAt = Date.now();
+          tr.total = Number(total) || tr.total || 0;
+        }
+        window.__sectorProgTrack[mkt] = tr;
+      } catch (eSlow) {}
       // 强制升级进度条 DOM 到「左侧取消」布局（只做一次）
       if (!window.__sptLayoutV5) {
         window.__sptLayoutV5 = true;
@@ -14657,6 +14792,7 @@ const FALLBACK_SECTORS = {
     }
     function hideSectorProgress(mkt, okMsg) {
       mkt = mkt === 'cn' ? 'cn' : 'us';
+      try { clearSectorRefreshSlowHint(); } catch (eH) {}
       window.__sectorProgressByMkt[mkt] = null;
       if (currentSectorMkt() === mkt) {
         const el = document.getElementById('sectorProgressToast');
@@ -14725,16 +14861,23 @@ const FALLBACK_SECTORS = {
     // 全量刷新进度跑着时：只用 quoteCache 重算当前可见的大类/细分涨跌并写回页面
     function avgStocksChgFromCacheOnly(symbols) {
       if (!symbols || !symbols.length) return { chg: 0, n: 0 };
-      // 全量平均：优先东财 __emUSMap（与二级/最终算法同源），避免退回一级时
-      // 先用残缺/旧的 quoteCache 画一版、再被东财结果覆盖造成「两种数字」闪变
+      var fhRoute = false;
+      try { fhRoute = typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute(); } catch (eR) {}
       var sum = 0, n = 0;
       for (var k = 0; k < symbols.length; k++) {
         var sym = symbols[k];
         var q = null;
-        try {
-          if (typeof getEmUSQuote === 'function') q = getEmUSQuote(sym);
-        } catch (eEm) {}
-        if (!q || !(q.c > 0)) q = quoteCache[sym];
+        if (fhRoute) {
+          q = quoteCache[sym];
+          if ((!q || !(q.c > 0)) && typeof getEmUSQuote === 'function') {
+            try { q = getEmUSQuote(sym); } catch (eEm0) {}
+          }
+        } else {
+          try {
+            if (typeof getEmUSQuote === 'function') q = getEmUSQuote(sym);
+          } catch (eEm) {}
+          if (!q || !(q.c > 0)) q = quoteCache[sym];
+        }
         var dp = (typeof getQuoteDailyDp === 'function') ? getQuoteDailyDp(q) : (q && q.dp);
         if (dp != null && !isNaN(dp)) {
           sum += dp;
@@ -14751,9 +14894,9 @@ const FALLBACK_SECTORS = {
         var drawer = document.getElementById('detailDrawer');
         if (drawer && drawer.classList.contains('show')) return;
 
-        // 有东财表时确保已归类，避免角标掉回「仅树内」数量
         try {
-          if (Object.keys(window.__emUSMap || {}).length > 200 && typeof classifyEmUSIntoSectors === 'function') {
+          if ((typeof usesEmSectorTree !== 'function' || usesEmSectorTree('us')) &&
+              Object.keys(window.__emUSMap || {}).length > 200 && typeof classifyEmUSIntoSectors === 'function') {
             if (!window.__usEmClassifiedAt) classifyEmUSIntoSectors();
           }
         } catch (eCl) {}
@@ -14928,7 +15071,271 @@ const FALLBACK_SECTORS = {
      *  - 二级细分：只刷新当前大类下的细分涨跌（不跑 500+ 全量进度）
      *  - 成分股抽屉打开时：只重拉当前细分成分股
      */
-    async function onSectorRefreshClick() {
+    function getSectorRouteMkt() {
+      try {
+        // 0) 以 sectorMarket 变量为准（switchSectorMarket 同步写入，最可靠）
+        if (typeof sectorMarket === 'string' && (sectorMarket === 'cn' || sectorMarket === 'us')) {
+          return sectorMarket;
+        }
+        if (typeof currentSectorMkt === 'function') {
+          var m0 = currentSectorMkt();
+          if (m0 === 'cn' || m0 === 'us') return m0;
+        }
+        // 1) 再看板块页 Tab 真实选中（兜底）
+        var cnBtn = document.getElementById('sectorTabCN');
+        var usBtn = document.getElementById('sectorTabUS');
+        if (cnBtn && usBtn) {
+          var cnBg = (cnBtn.style && cnBtn.style.background) ? String(cnBtn.style.background) : '';
+          var usBg = (usBtn.style && usBtn.style.background) ? String(usBtn.style.background) : '';
+          // switchSectorMarket 把选中项设为 var(--blue)
+          if (cnBg.indexOf('blue') >= 0 || cnBg.indexOf('4d9fff') >= 0 || cnBg.indexOf('77, 159, 255') >= 0) {
+            return 'cn';
+          }
+          if (usBg.indexOf('blue') >= 0 || usBg.indexOf('4d9fff') >= 0 || usBg.indexOf('77, 159, 255') >= 0) {
+            return 'us';
+          }
+          // 再比颜色字：选中为 #fff
+          try {
+            if (cnBtn.style.color === '#fff' || cnBtn.style.color === 'rgb(255, 255, 255)') return 'cn';
+            if (usBtn.style.color === '#fff' || usBtn.style.color === 'rgb(255, 255, 255)') return 'us';
+          } catch (eC) {}
+        }
+      } catch (e) {}
+      return 'us';
+    }
+    // 默认：东财直连 = 1（美股/A股各自独立，互不串台）
+    function sectorRouteDefs(mkt) {
+      mkt = (mkt === 'cn') ? 'cn' : 'us';
+      if (mkt === 'cn') {
+        // 名称=实际入口，避免全叫东财分不清
+        return [
+          { short: '线路1', full: '线路1·东财代理', tip: 'Worker→push2.eastmoney' },
+          { short: '线路2', full: '线路2·东财直连', tip: '浏览器直连 push2.eastmoney' },
+          { short: '线路3', full: '线路3·东财79/82', tip: '79/82.push2.eastmoney 备用节点' },
+          { short: '线路4', full: '线路4·新浪财经', tip: '成分东财·行情新浪 hq.sinajs.cn' },
+          { short: '线路5', full: '线路5·腾讯财经', tip: '成分东财·行情腾讯 qt.gtimg.cn' }
+        ];
+      }
+      return [
+        { short: '线路1', full: '线路1·东财代理', tip: 'Worker→东财美股列表' },
+        { short: '线路2', full: '线路2·东财直连', tip: '浏览器直连东财美股列表' },
+        { short: '线路3', full: '线路3·Finnhub', tip: '板块涨跌/成分走 Finnhub（Worker代理）；不拉东财全表' }
+      ];
+    }
+    function getSectorRouteMax(mkt) {
+      return sectorRouteDefs(mkt).length - 1;
+    }
+    function isUSFinnhubRoute() {
+      try {
+        return getSectorRoute('us') === 2;
+      } catch (e) { return false; }
+    }
+    /** 东财代理/直连（A股含79/82）共用东财归类树；其它线路用内置树+该接口行情 */
+    function usesEmSectorTree(mkt) {
+      mkt = mkt === 'cn' ? 'cn' : 'us';
+      var n = 1;
+      try { n = getSectorRoute(mkt); } catch (e) {}
+      if (mkt === 'us') return n === 0 || n === 1;
+      return n === 0 || n === 1 || n === 2;
+    }
+    function sectorRouteSourceName(mkt) {
+      mkt = mkt === 'cn' ? 'cn' : 'us';
+      var n = 1;
+      try { n = getSectorRoute(mkt); } catch (e) {}
+      if (mkt === 'us') {
+        if (n === 2) return 'Finnhub';
+        if (n === 1) return '东财直连';
+        return '东财代理';
+      }
+      if (n === 3) return '新浪';
+      if (n === 4) return '腾讯';
+      if (n === 2) return '东财79/82';
+      if (n === 1) return '东财直连';
+      return '东财代理';
+    }
+    function getSectorRoute(mktOpt) {
+      var mkt = (mktOpt === 'cn' || mktOpt === 'us')
+        ? mktOpt
+        : (getSectorRouteMkt() === 'cn' ? 'cn' : 'us');
+      window.__sectorRouteByMkt = window.__sectorRouteByMkt || { us: 1, cn: 1 };
+      if (window.__sectorRouteByMkt.us == null) window.__sectorRouteByMkt.us = 1;
+      if (window.__sectorRouteByMkt.cn == null) window.__sectorRouteByMkt.cn = 1;
+      if (mkt === 'us' && window.__sectorUSRoute != null && window.__sectorRouteInitedUS == null) {
+        window.__sectorRouteByMkt.us = window.__sectorUSRoute;
+        window.__sectorRouteInitedUS = true;
+      }
+      var n = Number(window.__sectorRouteByMkt[mkt]);
+      if (isNaN(n) || n < 0) n = 1;
+      var max = getSectorRouteMax(mkt);
+      if (n > max) n = max;
+      return n;
+    }
+    function setSectorRoute(n, mktOpt) {
+      var mkt = (mktOpt === 'cn' || mktOpt === 'us')
+        ? mktOpt
+        : (getSectorRouteMkt() === 'cn' ? 'cn' : 'us');
+      n = Number(n);
+      if (isNaN(n) || n < 0) n = 1;
+      var max = getSectorRouteMax(mkt);
+      if (n > max) n = max;
+      window.__sectorRouteByMkt = window.__sectorRouteByMkt || { us: 1, cn: 1 };
+      window.__sectorRouteByMkt[mkt] = n;
+      if (mkt === 'us') window.__sectorUSRoute = n;
+      return n;
+    }
+    function sectorRouteNames(mkt) {
+      return sectorRouteDefs(mkt).map(function (d) { return d.full; });
+    }
+    function rebuildSectorRouteMenu() {
+      var menu = document.getElementById('sectorRouteMenu');
+      if (!menu) return;
+      var mkt = getSectorRouteMkt() === 'cn' ? 'cn' : 'us';
+      // 与 Tab 再对齐一次，防止变量滞后
+      try {
+        var cnBtn = document.getElementById('sectorTabCN');
+        if (cnBtn && (String(cnBtn.style.background || '').indexOf('blue') >= 0 || cnBtn.style.color === '#fff')) {
+          mkt = 'cn';
+        }
+      } catch (eA) {}
+      var defs = sectorRouteDefs(mkt);
+      // 硬保险：A股菜单不得出现 Finnhub
+      if (mkt === 'cn') {
+        defs = (defs || []).filter(function (d) {
+          return d && d.full && d.full.indexOf('Finnhub') < 0 && d.full.indexOf('finnhub') < 0;
+        });
+        if (!defs.length) {
+          defs = [
+            { short: '线路1', full: '线路1·东财代理' },
+            { short: '线路2', full: '线路2·东财直连' },
+            { short: '线路3', full: '线路3·东财79/82' },
+            { short: '线路4', full: '线路4·新浪财经' },
+            { short: '线路5', full: '线路5·腾讯财经' }
+          ];
+        }
+      }
+      var r = getSectorRoute();
+      if (r >= defs.length) r = Math.min(1, defs.length - 1);
+      var html = '';
+      for (var i = 0; i < defs.length; i++) {
+        var on = (i === r);
+        html += '<button type="button" class="sector-route-opt" data-route="' + i + '" data-mkt="' + mkt + '" onclick="selectSectorRoute(' + i + ',event)" style="display:block;width:100%;text-align:left;border:none;background:' +
+          (on ? 'rgba(77,159,255,0.18)' : 'transparent') +
+          ';color:' + (on ? 'var(--blue)' : 'var(--text)') +
+          ';font-size:0.75rem;padding:8px 12px;cursor:pointer;">' + defs[i].full + '</button>';
+      }
+      menu.setAttribute('data-mkt', mkt);
+      menu.innerHTML = html;
+    }
+    function updateSectorRouteBtnLabel() {
+      try {
+        var btn = document.getElementById('sectorRouteBtn');
+        if (!btn) return;
+        var mkt = getSectorRouteMkt() === 'cn' ? 'cn' : 'us';
+        var defs = sectorRouteDefs(mkt);
+        var r = getSectorRoute();
+        btn.textContent = (defs[r] && defs[r].short ? defs[r].short : ('线路' + (r + 1))) + ' ▾';
+        rebuildSectorRouteMenu();
+      } catch (e) {}
+    }
+    function closeSectorRouteMenu() {
+      try {
+        var menu = document.getElementById('sectorRouteMenu');
+        if (menu) menu.style.display = 'none';
+      } catch (e) {}
+    }
+    function toggleSectorRouteMenu(ev) {
+      try {
+        if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+        var menu = document.getElementById('sectorRouteMenu');
+        if (!menu) return;
+        var open = menu.style.display === 'block';
+        if (open) {
+          menu.style.display = 'none';
+        } else {
+          // 每次展开都按当前 Tab 重画（A股5条 / 美股3条）
+          if (typeof updateSectorRouteBtnLabel === 'function') updateSectorRouteBtnLabel();
+          else if (typeof rebuildSectorRouteMenu === 'function') rebuildSectorRouteMenu();
+          menu.style.display = 'block';
+        }
+      } catch (e) { console.warn(e); }
+    }
+function selectSectorRoute(n, ev) {
+      try {
+        if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+        // 优先用菜单按钮上的 data-mkt（rebuild 时写入），避免误判成另一市场
+        var mkt = null;
+        try {
+          var t = ev && (ev.currentTarget || ev.target);
+          if (t && t.getAttribute) {
+            var dm = t.getAttribute('data-mkt');
+            if (dm === 'cn' || dm === 'us') mkt = dm;
+            else if (t.closest) {
+              var opt = t.closest('[data-mkt]');
+              if (opt) {
+                dm = opt.getAttribute('data-mkt');
+                if (dm === 'cn' || dm === 'us') mkt = dm;
+              }
+            }
+          }
+          if (!mkt) {
+            var menu = document.getElementById('sectorRouteMenu');
+            if (menu) {
+              dm = menu.getAttribute('data-mkt');
+              if (dm === 'cn' || dm === 'us') mkt = dm;
+            }
+          }
+        } catch (eDm) {}
+        if (mkt !== 'cn' && mkt !== 'us') {
+          mkt = getSectorRouteMkt() === 'cn' ? 'cn' : 'us';
+        }
+        n = Number(n);
+        if (isNaN(n) || n < 0) n = 1;
+        var max = getSectorRouteMax(mkt);
+        if (n > max) n = max;
+        window.__sectorRouteByMkt = window.__sectorRouteByMkt || { us: 1, cn: 1 };
+        window.__sectorRouteByMkt[mkt] = n;
+        if (mkt === 'us') window.__sectorUSRoute = n;
+        var defs = sectorRouteDefs(mkt);
+        updateSectorRouteBtnLabel();
+        closeSectorRouteMenu();
+        try {
+          window.__usL1LastGoodCards = null;
+          window.__usL1PaintSig = '';
+        } catch (eInv) {}
+        try {
+          if (mkt === 'us' && typeof repaintCurrentUSSectorFromCache === 'function') {
+            repaintCurrentUSSectorFromCache();
+          }
+        } catch (eRp) {}
+        if (typeof setSectorToast === 'function') {
+          var label = (defs[n] && defs[n].full) ? defs[n].full : ((defs[n] && defs[n].short) ? defs[n].short : ('线路' + (n + 1)));
+          var src = (typeof sectorRouteSourceName === 'function') ? sectorRouteSourceName(mkt) : '';
+          var treeTip = (mkt === 'us')
+            ? (usesEmSectorTree('us') ? '东财归类树' : '内置树')
+            : (usesEmSectorTree('cn') ? '东财板块树' : '内置申万树');
+          setSectorToast(true, (mkt === 'cn' ? 'A股' : '美股') + ' · ' + label + ' · ' + treeTip + '，请刷新', 3200);
+        }
+      } catch (e) { console.warn(e); }
+    }
+    function selectSectorUSRoute(n, ev) { return selectSectorRoute(n, ev); }
+    function onSectorRouteClick() {
+      toggleSectorRouteMenu();
+    }
+
+    if (!window.__sectorRouteMenuOutsideBound) {
+      window.__sectorRouteMenuOutsideBound = true;
+      document.addEventListener('click', function (e) {
+        try {
+          var wrap = document.getElementById('sectorRouteWrap');
+          var menu = document.getElementById('sectorRouteMenu');
+          if (!menu || menu.style.display !== 'block') return;
+          if (wrap && wrap.contains(e.target)) return;
+          menu.style.display = 'none';
+        } catch (err) {}
+      }, true);
+    }
+
+async function onSectorRefreshClick() {
       try {
         const mkt = (typeof currentSectorMkt === 'function') ? currentSectorMkt() : (sectorMarket || 'us');
         const drawer = document.getElementById('detailDrawer');
@@ -14984,6 +15391,156 @@ const FALLBACK_SECTORS = {
       }
     }
 
+    
+    // A股线路4/5：新浪 / 腾讯真实行情（名单仍靠东财板块成分）
+    function cnCodeToSinaSym(code) {
+      code = String(code || '').replace(/\D/g, '');
+      if (code.length !== 6) return '';
+      var c0 = code.charAt(0);
+      if (c0 === '6' || c0 === '9') return 'sh' + code;
+      if (c0 === '4' || c0 === '8') return 'bj' + code; // 北交所
+      return 'sz' + code;
+    }
+    async function fetchTextViaWorkerOrDirect(url, timeoutMs) {
+      timeoutMs = timeoutMs || 12000;
+      var tries = [];
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        tries.push(String(WORKER_BASE).replace(/\?.*$/, '') + '?url=' + encodeURIComponent(url));
+      }
+      tries.push(url);
+      var needGbk = /hq\.sinajs\.cn|qt\.gtimg\.cn|ifzq\.gtimg\.cn/i.test(String(url || ''));
+      for (var i = 0; i < tries.length; i++) {
+        try {
+          var res = await (typeof fetchWithTimeoutSimple === 'function'
+            ? fetchWithTimeoutSimple(tries[i], timeoutMs)
+            : fetch(tries[i], { cache: 'no-store' }));
+          if (!res || !res.ok) continue;
+          var txt = null;
+          // Worker 已转 UTF-8 时直接 text；直连新浪/腾讯仍可能是 GBK
+          if (needGbk && i > 0 && typeof TextDecoder !== 'undefined') {
+            try {
+              var buf = await res.arrayBuffer();
+              try { txt = new TextDecoder('gb18030').decode(buf); }
+              catch (e1) {
+                try { txt = new TextDecoder('gbk').decode(buf); }
+                catch (e2) { txt = new TextDecoder('utf-8').decode(buf); }
+              }
+            } catch (eBuf) {
+              txt = await res.text();
+            }
+          } else {
+            txt = await res.text();
+          }
+          if (txt && txt.length > 10) return txt;
+        } catch (e) {}
+      }
+      return null;
+    }
+    function parseSinaHqText(txt) {
+      var map = {};
+      if (!txt) return map;
+      var re = /hq_str_([a-z]{2}\d{6})="([^"]*)"/g;
+      var m;
+      while ((m = re.exec(txt))) {
+        var sym = m[1];
+        var parts = m[2].split(',');
+        if (parts.length < 4) continue;
+        var code = sym.slice(2);
+        var price = parseFloat(parts[3]);
+        var prev = parseFloat(parts[2]);
+        var name = parts[0] || '';
+        var chg = null;
+        if (isFinite(price) && isFinite(prev) && prev) chg = ((price - prev) / prev) * 100;
+        map[code] = {
+          code: code,
+          name: name,
+          price: isFinite(price) ? price : null,
+          chg: chg != null && isFinite(chg) ? Math.round(chg * 100) / 100 : null
+        };
+      }
+      return map;
+    }
+    function parseTencentHqText(txt) {
+      var map = {};
+      if (!txt) return map;
+      var re = /v_([a-z]{2}\d{6})="([^"]*)"/g;
+      var m;
+      while ((m = re.exec(txt))) {
+        var sym = m[1];
+        var parts = m[2].split('~');
+        if (parts.length < 6) continue;
+        var code = sym.slice(2);
+        var name = parts[1] || '';
+        var price = parseFloat(parts[3]);
+        var chg = parseFloat(parts[5]);
+        map[code] = {
+          code: code,
+          name: name,
+          price: isFinite(price) ? price : null,
+          chg: isFinite(chg) ? Math.round(chg * 100) / 100 : null
+        };
+      }
+      return map;
+    }
+    async function fetchCNQuotesSina(codes) {
+      var map = {};
+      var list = (codes || []).map(cnCodeToSinaSym).filter(Boolean);
+      var batch = 40;
+      for (var i = 0; i < list.length; i += batch) {
+        var chunk = list.slice(i, i + batch);
+        var url = 'https://hq.sinajs.cn/list=' + chunk.join(',');
+        var txt = await fetchTextViaWorkerOrDirect(url, 12000);
+        var part = parseSinaHqText(txt);
+        Object.keys(part).forEach(function (k) { map[k] = part[k]; });
+      }
+      return map;
+    }
+    async function fetchCNQuotesTencent(codes) {
+      var map = {};
+      var list = (codes || []).map(cnCodeToSinaSym).filter(Boolean);
+      var batch = 40;
+      for (var i = 0; i < list.length; i += batch) {
+        var chunk = list.slice(i, i + batch);
+        var url = 'https://qt.gtimg.cn/q=' + chunk.join(',');
+        var txt = await fetchTextViaWorkerOrDirect(url, 12000);
+        var part = parseTencentHqText(txt);
+        Object.keys(part).forEach(function (k) { map[k] = part[k]; });
+      }
+      return map;
+    }
+    function looksLikeGarbledCnName(name) {
+      if (!name) return true;
+      var s = String(name);
+      // 替换字符 / 大量 ? 或控制符 → 乱码
+      if (/\uFFFD|\?{2,}|[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(s)) return true;
+      // 正常 A 股简称几乎都含汉字
+      if (!/[\u4e00-\u9fff]/.test(s) && s.length > 0) return true;
+      return false;
+    }
+    async function enrichCNStocksWithAltQuotes(stocks, rtCn) {
+      if (!stocks || !stocks.length) return { stocks: stocks || [], hit: 0, total: 0 };
+      var codes = stocks.map(function (s) { return s.code; }).filter(Boolean);
+      var qmap = {};
+      try {
+        if (rtCn === 3) qmap = await fetchCNQuotesSina(codes);
+        else if (rtCn === 4) qmap = await fetchCNQuotesTencent(codes);
+      } catch (e) { console.warn('alt quote', e); }
+      var hit = 0;
+      stocks.forEach(function (s) {
+        var q = qmap[s.code];
+        if (!q) return;
+        hit++;
+        // 东财名单自带正确中文名；新浪/腾讯若仍是乱码则不覆盖
+        if (q.name && !looksLikeGarbledCnName(q.name)) {
+          if (!s.name || looksLikeGarbledCnName(s.name)) s.name = q.name;
+        }
+        if (q.price != null) s.price = q.price;
+        if (q.chg != null) s.chg = q.chg;
+      });
+      return { stocks: stocks, hit: hit, total: codes.length };
+    }
+
+
     async function fullRefreshSectors() {
       try { if (typeof pruneUSDeadFromTree === 'function') pruneUSDeadFromTree(); } catch (ePrune2) {}
 
@@ -15012,6 +15569,7 @@ const FALLBACK_SECTORS = {
       window.__sectorRefreshBusy[mkt] = true;
       window.__sectorRefreshStartedAt = Date.now();
       const myTok = (window.__sectorRefreshTok[mkt] = (window.__sectorRefreshTok[mkt] || 0) + 1);
+      try { armSectorRefreshSlowHint(mkt, myTok); } catch (eArm) {}
       try {
         if (mkt === 'us') {
           // 保留旧卡片数据，刷新完成后再用新数据覆盖
@@ -15021,16 +15579,51 @@ const FALLBACK_SECTORS = {
           var lab = isNewDay ? '最新数据更新中' : '美股更新中';
           showSectorProgress('us', 0, 100, lab + ' · 准备…');
           try {
-            try {
-              await loadEMUSUniverse(true);
-            } catch (eEm) {}
-            if (myTok !== window.__sectorRefreshTok.us) return;
+            var fhRoute = false;
+            try { fhRoute = typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute(); } catch (eFh) {}
             var emN = 0;
+            var fhOk = 0;
+            if (fhRoute) {
+              var fhList = (syms && syms.length) ? syms.slice() : [];
+              var totalFh = Math.max(1, fhList.length);
+              showSectorProgress('us', 1, 100, lab + ' · Finnhub 0/' + fhList.length);
+              var CONC_FR = 6;
+              for (var fi = 0; fi < fhList.length; fi += CONC_FR) {
+                if (myTok !== window.__sectorRefreshTok.us) return;
+                var fbatch = fhList.slice(fi, fi + CONC_FR);
+                await Promise.all(fbatch.map(async function (sym) {
+                  try {
+                    var q = await Promise.race([
+                      fetchQuote(sym, { finnhubOnly: true }),
+                      new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 4500); })
+                    ]);
+                    if ((!q || !(q.c > 0))) {
+                      q = await Promise.race([
+                        fetchQuote(sym, { finnhubOnly: false }),
+                        new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 3500); })
+                      ]);
+                    }
+                    if (q && q.c > 0) {
+                      try { putQuoteCache(sym, q); } catch (e1) { quoteCache[sym] = q; }
+                      fhOk++;
+                    }
+                  } catch (eOne) {}
+                }));
+                var doneN = Math.min(fi + CONC_FR, fhList.length);
+                showSectorProgress('us', 1 + Math.round((doneN / totalFh) * 90), 100,
+                  lab + ' · Finnhub ' + doneN + '/' + fhList.length + ' · 命中 ' + fhOk);
+              }
+              try { if (typeof saveQuoteCacheToDisk === 'function') saveQuoteCacheToDisk(); } catch (eSv) {}
+            } else {
+              try { await loadEMUSUniverse(true); } catch (eEm) {}
+            }
+            if (myTok !== window.__sectorRefreshTok.us) return;
             try { emN = Object.keys(window.__emUSMap || {}).length; } catch (eN) {}
             try { pushSectorDailyMeta({ source: isNewDay ? 'new-day' : 'manual-refresh' }); } catch (eM) {}
-            // 对齐 A 股：一条进度，拉完直接汇总，无「补缺」阶段
             if (myTok !== window.__sectorRefreshTok.us) return;
-            showSectorProgress('us', 95, 100, lab + (emN ? (' · 已拉 ' + emN + ' 只') : '') + ' · 汇总界面…');
+            showSectorProgress('us', 95, 100, fhRoute
+              ? (lab + ' · Finnhub 命中 ' + fhOk + ' · 汇总界面…')
+              : (lab + (emN ? (' · 已拉 ' + emN + ' 只') : '') + ' · 汇总界面…'));
             if (currentSectorMkt() === 'us') {
               try {
                 if (typeof usSectorView !== 'undefined' && usSectorView === 'l2' && usSectorL1 && typeof openUSSectorL1 === 'function') {
@@ -15048,14 +15641,15 @@ const FALLBACK_SECTORS = {
               if (myTok === window.__sectorRefreshTok.us) {
                 var emN2 = 0;
                 try { emN2 = Object.keys(window.__emUSMap || {}).length; } catch (eN2) {}
-                // 强制把本趟全量结果写入 D1，避免关网页重开又变旧角标
+                var fhDone = false;
+                try { fhDone = typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute(); } catch (eFd) {}
                 try {
-                  if (emN2 > 100 && typeof persistSectorCloudFull === 'function') {
+                  if (!fhDone && emN2 > 100 && typeof persistSectorCloudFull === 'function') {
                     showSectorProgress('us', 98, 100, (isNewDay ? '最新数据更新中' : '美股更新中') + ' · 写入云端…');
                     await persistSectorCloudFull(isNewDay ? 'new-day' : 'manual-refresh');
                   }
                 } catch (ePers) { console.warn('persist after refresh', ePers); }
-                hideSectorProgress('us', isNewDay ? '最新数据已更新' : ('美股已更新 · 东财 ' + emN2 + ' 只'));
+                hideSectorProgress('us', isNewDay ? '最新数据已更新' : (fhDone ? '美股已更新 · Finnhub' : ('美股已更新 · 东财 ' + emN2 + ' 只')));
               }
             } catch (eHide) {
               try { hideSectorProgress('us'); } catch (eH2) {}
@@ -15098,13 +15692,50 @@ const FALLBACK_SECTORS = {
                 '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + board +
                 '&fields=f12,f14,f2,f3&_=' + Date.now();
               var urls = [];
+              var rtCn = 1;
+              try { rtCn = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (eRt) {}
+              // 线路2/3 调整东财域名顺序
+              if (rtCn === 2) {
+                hosts = [
+                  'https://79.push2.eastmoney.com',
+                  'https://82.push2.eastmoney.com',
+                  'https://push2.eastmoney.com',
+                  'https://push2delay.eastmoney.com'
+                ];
+              } else if (rtCn === 0 || rtCn === 1) {
+                hosts = [
+                  'https://push2delay.eastmoney.com',
+                  'https://push2.eastmoney.com',
+                  'https://82.push2.eastmoney.com',
+                  'https://79.push2.eastmoney.com'
+                ];
+              }
               hosts.forEach(function (h) {
                 var u = h + path;
+                var viaW = null;
                 if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-                  urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
+                  viaW = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u);
                 }
-                urls.push(u);
+                // 0代理优先 1直连优先 2备用域名 3/4仍先直连东财，失败再代理（名单源仍主要东财）
+                if (rtCn === 0) {
+                  if (viaW) urls.push(viaW);
+                  urls.push(u);
+                } else {
+                  urls.push(u);
+                  if (viaW) urls.push(viaW);
+                }
               });
+              // 线路4/5：成分名单仍用东财；行情由新浪/腾讯覆盖
+              if (rtCn >= 3) {
+                urls = [];
+                hosts.forEach(function (h) {
+                  var u = h + path;
+                  if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+                    urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
+                  }
+                  urls.push(u);
+                });
+              }
               for (let pi = 0; pi < urls.length; pi++) {
                 try {
                   const res = await (typeof fetchWithTimeoutSimple === 'function'
@@ -15150,6 +15781,18 @@ const FALLBACK_SECTORS = {
               if (stocks.length >= totalHint) break;
               if (pageData.list.length < 100) break;
             }
+            // 线路4=新浪 线路5=腾讯：用真实行情覆盖东财价
+            try {
+              var rtQ = 1;
+              try { rtQ = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (eR) {}
+              if ((rtQ === 3 || rtQ === 4) && stocks.length && typeof enrichCNStocksWithAltQuotes === 'function') {
+                var en = await enrichCNStocksWithAltQuotes(stocks, rtQ);
+                if (en && en.stocks) stocks = en.stocks;
+                if (en && en.hit === 0 && stocks.length > 5) {
+                  console.warn('alt quotes miss', rtQ, en.total);
+                }
+              }
+            } catch (eEn) { console.warn(eEn); }
             return { stocks: stocks, totalHint: totalHint || stocks.length };
           }
 
@@ -15159,7 +15802,8 @@ const FALLBACK_SECTORS = {
             var p = Math.max(0, Math.min(100, Math.round(pct)));
             showSectorProgress('cn', p, 100, label || (isNewDayCn ? '最新数据更新中…' : 'A股完整刷新…'));
           }
-          showCnUnified(0, isNewDayCn ? '最新数据更新中…' : 'A股完整刷新…');
+          var cnSrc = (typeof sectorRouteSourceName === 'function') ? sectorRouteSourceName('cn') : '东财';
+          showCnUnified(0, (isNewDayCn ? '最新数据更新中' : 'A股更新中') + ' · ' + cnSrc + '…');
           const boardTotals = {};
           let universe0 = [];
           try {
@@ -15408,6 +16052,8 @@ const FALLBACK_SECTORS = {
       sectorMarketToken += 1;
       const switchTok = sectorMarketToken;
       try { if (typeof setSectorToast === 'function') setSectorToast(false); } catch (eT) {}
+      try { if (typeof closeSectorRouteMenu === 'function') closeSectorRouteMenu(); } catch (eM) {}
+      try { if (typeof updateSectorRouteBtnLabel === 'function') updateSectorRouteBtnLabel(); } catch (eL) {}
       try { if (typeof syncSectorProgressVisibility === 'function') syncSectorProgressVisibility(); } catch (e) {}
       usSectorView = 'l1';
       usSectorL1 = null;
@@ -16100,6 +16746,25 @@ const FALLBACK_SECTORS = {
         'https://82.push2.eastmoney.com',
         'https://79.push2.eastmoney.com'
       ];
+      try {
+        var rt = (typeof getSectorRoute === 'function') ? getSectorRoute('us') : (window.__sectorUSRoute || 0);
+        // 线0=东财代理 线1=东财直连；线2=Finnhub，全表接口若仍被调用则用默认东财序，不假装换线路
+        if (rt === 1) {
+          hosts = [
+            'https://push2.eastmoney.com',
+            'https://push2delay.eastmoney.com',
+            'https://79.push2.eastmoney.com',
+            'https://82.push2.eastmoney.com'
+          ];
+        } else if (rt === 2) {
+          hosts = [
+            'https://79.push2.eastmoney.com',
+            'https://82.push2.eastmoney.com',
+            'https://push2delay.eastmoney.com',
+            'https://push2.eastmoney.com'
+          ];
+        }
+      } catch (eRt) {}
       function withTimeout(promise, ms) {
         return new Promise(function (resolve) {
           var done = false;
@@ -16124,24 +16789,35 @@ const FALLBACK_SECTORS = {
       for (var hi = 0; hi < hosts.length; hi++) {
         var url = hosts[hi] + path;
         var data = null;
+        var preferDirect = false;
+        try { preferDirect = ((typeof getSectorRoute === 'function') ? getSectorRoute('us') : 1) === 1; } catch (ePf) {}
+        async function tryDirect(u0) {
+          try {
+            var res = await fetch(u0, { cache: 'no-store', mode: 'cors' });
+            if (res && res.ok) return await res.json();
+          } catch (eD) {}
+          return null;
+        }
+        async function tryWorker(u0) {
+          try {
+            if (typeof WORKER_BASE === 'undefined' || !WORKER_BASE) return null;
+            var wu = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u0);
+            var res = await fetch(wu, { cache: 'no-store', mode: 'cors' });
+            if (res && res.ok) return await res.json();
+          } catch (eW) {}
+          return null;
+        }
         try {
-          if (typeof fetchViaProxies === 'function') {
-            data = await withTimeout(fetchViaProxies(url), 12000);
+          if (preferDirect) {
+            data = await withTimeout(tryDirect(url), 12000);
+            if (!data) data = await withTimeout(tryWorker(url), 12000);
+            if (!data && typeof fetchViaProxies === 'function') data = await withTimeout(fetchViaProxies(url), 12000);
+          } else {
+            if (typeof fetchViaProxies === 'function') data = await withTimeout(fetchViaProxies(url), 12000);
+            if (!data) data = await withTimeout(tryWorker(url), 12000);
+            if (!data) data = await withTimeout(tryDirect(url), 12000);
           }
         } catch (e1) { data = null; }
-        if (!data) {
-          try {
-            data = await withTimeout((async function () {
-              var u = url;
-              if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-                u = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(url);
-              }
-              var res = await fetch(u, { cache: 'no-store', mode: 'cors' });
-              if (res && res.ok) return await res.json();
-              return null;
-            })(), 12000);
-          } catch (e2) { data = null; }
-        }
         if (data && data.data && (data.data.diff || data.data.total != null)) return data;
       }
       return null;
@@ -16223,7 +16899,9 @@ const FALLBACK_SECTORS = {
         } catch (eTok) { window.__emUSLoadTok = 0; }
         function reportEmUSProgress(got, tot, label) {
           try {
-            // 已取消 / 过期批次：禁止回写进度，也禁止把 busy 重新点亮
+            try {
+              if (typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute()) return;
+            } catch (eFhP) {}
             if (myProgGen !== window.__emUSProgGen) return;
             if (typeof emUSCancelled === 'function' && emUSCancelled()) return;
             var t = Math.max(1, tot || 1);
@@ -16317,6 +16995,7 @@ const FALLBACK_SECTORS = {
         var sessionGot = ingestDiff(diff0) || 0;
         var pageSize = 100;
         var pages = Math.max(1, Math.ceil(total / pageSize));
+        try { window.__emUSLastTotal = total; } catch (eTot) {}
         var CONC = 4;
         var deadline = Date.now() + 75 * 1000; // 整次最多 75 秒，防止永远卡在 89%
         var stagnant = 0;
@@ -16409,7 +17088,37 @@ const FALLBACK_SECTORS = {
     async function avgStocksChg(symbols, force) {
       if (!symbols || !symbols.length) return { chg: 0, n: 0 };
       const list = symbols.slice();
-      // 优先东财全市场表（一次拉全，板块涨跌秒算）
+      var fhRoute = false;
+      try { fhRoute = typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute(); } catch (eR) {}
+      if (fhRoute) {
+        const need = [];
+        for (let i = 0; i < list.length; i++) {
+          const q = quoteCache[list[i]];
+          if (force || !q || !(q.c > 0)) need.push(list[i]);
+        }
+        const CONC_FH = 5;
+        for (let i = 0; i < need.length; i += CONC_FH) {
+          const batch = need.slice(i, i + CONC_FH);
+          await Promise.all(batch.map(async function (sym) {
+            try {
+              var q = await Promise.race([
+                fetchQuote(sym, { finnhubOnly: true }),
+                new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 4000); })
+              ]);
+              if ((!q || !(q.c > 0))) {
+                q = await Promise.race([
+                  fetchQuote(sym, { finnhubOnly: false }),
+                  new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 3500); })
+                ]);
+              }
+              if (q && q.c > 0) {
+                try { putQuoteCache(sym, q); } catch (e1) { quoteCache[sym] = q; }
+              }
+            } catch (e) {}
+          }));
+        }
+        return avgStocksChgFromCacheOnly(list);
+      }
       try {
         if (!emUSMapFresh()) {
           await loadEMUSUniverse(false);
@@ -16960,6 +17669,7 @@ const FALLBACK_SECTORS = {
 
     function getEmExtraStocksForL1(l1id) {
       try {
+        if (typeof usesEmSectorTree === 'function' && !usesEmSectorTree('us')) return [];
         if (!window.__usEmByL1 || !window.__usEmClassifiedAt) classifyEmUSIntoSectors();
         var arr = (window.__usEmByL1 && window.__usEmByL1[l1id]) ? window.__usEmByL1[l1id].slice() : [];
         return arr.filter(function (sym) {
@@ -16971,6 +17681,7 @@ const FALLBACK_SECTORS = {
 
     function getEmExtraStocksForL2(l2id, l1id) {
       try {
+        if (typeof usesEmSectorTree === 'function' && !usesEmSectorTree('us')) return [];
         if (!window.__usEmByL2 || !window.__usEmClassifiedAt) classifyEmUSIntoSectors();
         var byL2 = window.__usEmByL2 || {};
         function _filt(arr) {
@@ -17147,12 +17858,13 @@ const FALLBACK_SECTORS = {
           setSectorToast(true, force ? '刷新美股大类…' : '加载美股大类…', 8000, 'us');
         }
       } catch (e) {}
-      // 东财全市场先预热（有缓存则秒过），板块涨跌不再依赖 Finnhub 逐只
       try {
-        if (!emUSMapFresh()) {
-          await loadEMUSUniverse(false);
-        } else if (force && !(window.__emUSMap && Object.keys(window.__emUSMap).length > 3000)) {
-          await loadEMUSUniverse(true);
+        if (!(typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute())) {
+          if (!emUSMapFresh()) {
+            await loadEMUSUniverse(false);
+          } else if (force && !(window.__emUSMap && Object.keys(window.__emUSMap).length > 3000)) {
+            await loadEMUSUniverse(true);
+          }
         }
       } catch (eEm0) {}
       // 先立刻画出结构（不阻塞），再补涨跌
@@ -17749,22 +18461,32 @@ const FALLBACK_SECTORS = {
               new Promise(function (resolve) { setTimeout(function () { resolve(null); }, ms); })
             ]);
           }
-          // 东财全表优先 → Finnhub → Yahoo；避免成分股一只只慢拉
-          let q = getEmUSQuote(sym);
-          if (!q || !(q.c > 0)) {
-            try {
-              if (!emUSMapFresh() && !window.__emUSLoadBusy) {
-                loadEMUSUniverse(false).catch(function () {});
-              }
-            } catch (e0) {}
+          var fhOne = false;
+          try { fhOne = typeof isUSFinnhubRoute === 'function' && isUSFinnhubRoute(); } catch (eFh1) {}
+          let q = null;
+          if (fhOne) {
+            q = await withTimeout(fetchQuote(sym, { finnhubOnly: true }), 4000);
+            if (!q || !(q.c > 0)) {
+              await new Promise(function (r) { setTimeout(r, 60); });
+              q = await withTimeout(fetchQuote(sym, { finnhubOnly: false }), 4000);
+            }
+          } else {
             q = getEmUSQuote(sym);
-          }
-          if (!q || !(q.c > 0)) {
-            q = await withTimeout(fetchQuote(sym, { finnhubOnly: true }), 3500);
-          }
-          if (!q || !(q.c > 0)) {
-            await new Promise(function (r) { setTimeout(r, 60); });
-            q = await withTimeout(fetchQuote(sym, { finnhubOnly: false }), 4000);
+            if (!q || !(q.c > 0)) {
+              try {
+                if (!emUSMapFresh() && !window.__emUSLoadBusy) {
+                  loadEMUSUniverse(false).catch(function () {});
+                }
+              } catch (e0) {}
+              q = getEmUSQuote(sym);
+            }
+            if (!q || !(q.c > 0)) {
+              q = await withTimeout(fetchQuote(sym, { finnhubOnly: true }), 3500);
+            }
+            if (!q || !(q.c > 0)) {
+              await new Promise(function (r) { setTimeout(r, 60); });
+              q = await withTimeout(fetchQuote(sym, { finnhubOnly: false }), 4000);
+            }
           }
           if (q && q.c > 0) {
             putQuoteCache(sym, q);
@@ -22585,15 +23307,61 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       list.push({
         id: 'eastmoney',
         name: '东方财富',
-        desc: 'A股行情 · 财务 F10',
-        url: 'https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f12&_=' + Date.now()
+        desc: 'A股指数行情',
+        url: 'https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f12,f2,f3&_=' + Date.now()
       });
+      var emUsRaw = 'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:105,m:106,m:107&fields=f12,f14,f2,f3&_=' + Date.now();
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        list.push({
+          id: 'em_us',
+          name: '东财美股列表',
+          desc: '板块线路1/2 全表 · 经代理',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(emUsRaw)
+        });
+      } else {
+        list.push({
+          id: 'em_us',
+          name: '东财美股列表',
+          desc: '板块线路1/2 全表 · 直连',
+          url: emUsRaw
+        });
+      }
       list.push({
         id: 'em_dc',
         name: '东财数据中心',
         desc: 'A股/美股财报接口',
         url: 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECUCODE&pageNumber=1&pageSize=1&filter=(SECUCODE%3D%22000001.SZ%22)&_=' + Date.now()
       });
+      // A股线路4/5：与 enrich 同源（优先 Worker 代理）
+      var sinaRaw = 'https://hq.sinajs.cn/list=sh000001,sz399001,_' + Date.now();
+      var tencentRaw = 'https://qt.gtimg.cn/q=sh000001,sz399001';
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        list.push({
+          id: 'sina',
+          name: '新浪财经',
+          desc: 'A股线路4 行情 · 经代理',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(sinaRaw)
+        });
+        list.push({
+          id: 'tencent',
+          name: '腾讯财经',
+          desc: 'A股线路5 行情 · 经代理',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(tencentRaw)
+        });
+      } else {
+        list.push({
+          id: 'sina',
+          name: '新浪财经',
+          desc: 'A股线路4 行情 · 直连',
+          url: sinaRaw
+        });
+        list.push({
+          id: 'tencent',
+          name: '腾讯财经',
+          desc: 'A股线路5 行情 · 直连',
+          url: tencentRaw
+        });
+      }
       var fhToken = (typeof FINNHUB_KEY !== 'undefined' && FINNHUB_KEY) ? FINNHUB_KEY : 'demo';
       // 探测优先走 Worker /api/quote，减少浏览器直连 Finnhub 占免费额度
       if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
@@ -22644,12 +23412,83 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       return '流畅';
     }
 
+    function probeHasUsableData(id, status, text) {
+      if (status >= 500) return { ok: false, tag: String(status) };
+      if (status > 0 && status !== 200 && status !== 0) {
+        if (status === 429) return { ok: false, tag: '429' };
+        if (status >= 400) return { ok: false, tag: String(status) };
+      }
+      var raw = (text == null) ? '' : String(text);
+      if (!raw || raw.length < 2) return { ok: false, tag: '无数据' };
+      if (/<html[\s>]|502 Bad Gateway|503 Service|error code:\s*502/i.test(raw.slice(0, 400))) {
+        return { ok: false, tag: '502' };
+      }
+      var j = null;
+      try { j = JSON.parse(raw); } catch (e) { j = null; }
+      if (id === 'worker') {
+        if (j && (j.ok === true || j.service || j.usage || j.health)) return { ok: true, tag: '在线' };
+        if (raw.indexOf('gushi') >= 0 || raw.indexOf('"ok"') >= 0) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'eastmoney') {
+        if (j && j.data) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'em_us') {
+        if (j && j.data && (j.data.total > 0 || (j.data.diff && (Array.isArray(j.data.diff) ? j.data.diff.length : Object.keys(j.data.diff).length)))) {
+          return { ok: true, tag: '在线' };
+        }
+        if (j && j.error) return { ok: false, tag: '失败' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'em_dc') {
+        if (j && (j.result || j.data || j.success === true || j.code === 0 || j.code === '0')) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'finnhub') {
+        var q = j;
+        if (q && q.quote) q = q.quote;
+        if (q && q.data && typeof q.data.c === 'number') q = q.data;
+        if (q && typeof q.c === 'number' && q.c > 0) return { ok: true, tag: '在线' };
+        if (q && q.error) return { ok: false, tag: '失败' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'yahoo') {
+        if (j && j.chart && j.chart.result && j.chart.result.length) return { ok: true, tag: '在线' };
+        if (j && j.contents) {
+          try {
+            var inner = JSON.parse(j.contents);
+            if (inner && inner.chart && inner.chart.result) return { ok: true, tag: '在线' };
+          } catch (e2) {}
+        }
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'sina') {
+        // hq_str_sh000001="上证指数,...."
+        if (/hq_str_[a-z]{2}\d{6}\s*=\s*"[^"]+/.test(raw) || /hq_str_sh000001/.test(raw)) {
+          return { ok: true, tag: '在线' };
+        }
+        if (raw.indexOf('hq_str_') >= 0 && raw.indexOf('=""') < 0) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'tencent') {
+        // v_sh000001="1~上证指数~..."
+        if (/v_[a-z]{2}\d{6}\s*=\s*"[^"]+/.test(raw) || /v_sh000001=/.test(raw)) {
+          return { ok: true, tag: '在线' };
+        }
+        if (raw.indexOf('~') >= 0 && raw.length > 20) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (status === 200 && raw.length > 8) return { ok: true, tag: '在线' };
+      return { ok: false, tag: '无数据' };
+    }
+
     async function probeOneTarget(t) {
-      const out = { id: t.id, name: t.name, desc: t.desc, ms: null, ok: false };
+      const out = { id: t.id, name: t.name, desc: t.desc, ms: null, ok: false, status: 0, tag: '失败' };
       try {
         const t0 = performance.now();
         const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 6000) : null;
+        const timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 8000) : null;
         const res = await fetch(t.url, {
           method: 'GET',
           cache: 'no-store',
@@ -22658,16 +23497,21 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         });
         if (timer) clearTimeout(timer);
         out.ms = Math.round(performance.now() - t0);
-        // 部分接口 CORS 可能 opaque；能完成往返即记延迟
-        out.ok = true;
-        if (res && typeof res.status === 'number' && res.type !== 'opaque' && res.status >= 500) {
-          out.ok = false;
-          out.error = 'HTTP ' + res.status;
-        }
+        var status = (res && typeof res.status === 'number') ? res.status : 0;
+        out.status = status;
+        var text = '';
+        try {
+          if (res && res.type !== 'opaque') text = await res.text();
+        } catch (eT) { text = ''; }
+        var chk = probeHasUsableData(t.id, status, text);
+        out.ok = !!chk.ok;
+        out.tag = chk.tag || (chk.ok ? '在线' : '失败');
+        if (!out.ok && status >= 500) out.tag = String(status);
       } catch (e) {
         out.ok = false;
         out.ms = null;
-        out.error = (e && e.name === 'AbortError') ? '超时' : '失败';
+        out.tag = (e && e.name === 'AbortError') ? '超时' : '失败';
+        out.error = out.tag;
       }
       return out;
     }
@@ -22724,9 +23568,29 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         text = String(st);
         cls = 'mid';
       }
-      return '<div class="np-row"><div><div class="np-name">' + name +
+      // WebSocket：中间状态，右侧延迟（有则显示）
+      var wsTag = text;
+      var wsMs = '--';
+      if (st === 'live' && /\d+ms$/.test(String(text))) {
+        wsTag = '在线';
+        wsMs = text;
+      } else if (st === 'connecting') {
+        wsTag = '连接中';
+        wsMs = '--';
+      } else if (st === 'overlimit') {
+        wsTag = '超限';
+        wsMs = '--';
+      } else if (st === 'error' || st === 'closed' || st === 'offline') {
+        wsTag = '断开';
+        wsMs = '--';
+      } else if (!st || st === 'off') {
+        wsTag = '--';
+        wsMs = '--';
+      }
+      return '<div class="np-row"><div class="np-left"><div class="np-name">' + name +
         '</div><div class="np-desc">' + desc +
-        '</div></div><div class="np-ms ' + cls + '">' + text + '</div></div>';
+        '</div></div><div class="np-tag ' + cls + '">' + wsTag +
+        '</div><div class="np-ms ' + cls + '">' + wsMs + '</div></div>';
     }
 
     function renderNetPanelBody() {
@@ -22734,30 +23598,31 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       if (!body) return;
       var wsRow = netWsStatusRowHtml();
       if (netProbeBusy && !lastNetDetails.length) {
-        body.innerHTML = wsRow + '<div class="np-row"><div><div class="np-name">探测中…</div></div><div class="np-ms pending">--</div></div>';
+        body.innerHTML = wsRow + '<div class="np-row"><div class="np-left"><div class="np-name">探测中…</div></div><div class="np-tag pending">…</div><div class="np-ms pending">--</div></div>';
         return;
       }
       if (!lastNetDetails.length) {
-        body.innerHTML = wsRow + '<div class="np-row"><div><div class="np-name">暂无数据</div><div class="np-desc">点刷新开始探测</div></div><div class="np-ms pending">--</div></div>';
+        body.innerHTML = wsRow + '<div class="np-row"><div class="np-left"><div class="np-name">暂无数据</div><div class="np-desc">点刷新开始探测</div></div><div class="np-tag pending">--</div><div class="np-ms pending">--</div></div>';
         return;
       }
       let html = wsRow;
       lastNetDetails.forEach(function (d) {
-        var msText, cls;
-        if (d.ms != null && d.ok) {
-          msText = d.ms + 'ms';
-          cls = netClsForMs(d.ms);
-        } else if (d.ms != null && !d.ok) {
-          msText = d.ms + 'ms';
-          cls = 'bad';
+        var tag = d.tag || (d.ok ? '在线' : (d.error || '失败'));
+        var tagCls, msText, msCls;
+        if (d.ok) {
+          tagCls = 'ok';
+          msText = (d.ms != null) ? (d.ms + 'ms') : '--';
+          msCls = netClsForMs(d.ms != null ? d.ms : 0);
         } else {
-          msText = d.error || '失败';
-          cls = 'bad';
+          tagCls = 'bad';
+          msText = (d.ms != null) ? (d.ms + 'ms') : '--';
+          msCls = (d.ms != null) ? 'mid' : 'bad';
         }
-        html += '<div class="np-row"><div><div class="np-name">' + d.name +
+        // 中间状态，右侧只保留延迟数字（原位置）
+        html += '<div class="np-row"><div class="np-left"><div class="np-name">' + d.name +
           '</div><div class="np-desc">' + (d.desc || '') +
-          (d.error && d.ms != null ? ' · ' + d.error : '') +
-          '</div></div><div class="np-ms ' + cls + '">' + msText + '</div></div>';
+          '</div></div><div class="np-tag ' + tagCls + '">' + tag +
+          '</div><div class="np-ms ' + msCls + '">' + msText + '</div></div>';
       });
       if (lastNetProbeAt) {
         try {
@@ -22772,7 +23637,33 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       body.innerHTML = html;
     }
 
+    function applyNetSummaryFromWorker(d) {
+      const el = document.getElementById('netStatus');
+      const tx = document.getElementById('netStatusText');
+      if (!el || !tx) return;
+      // 右上角只反映 Worker 延迟（未开面板时不扫其它接口）
+      if (d && d.ok && d.ms != null) {
+        lastNetMs = d.ms;
+        var cls = netClsForMs(d.ms);
+        el.className = 'net-status ' + cls;
+        tx.textContent = netLabelForMs(d.ms) + ' ' + d.ms + 'ms';
+        return;
+      }
+      lastNetMs = null;
+      el.className = 'net-status bad';
+      tx.textContent = '网络异常';
+    }
+
     function applyNetSummary() {
+      // 面板全量探测后：右上角仍优先用 Worker 行；没有 Worker 再退回最低延迟
+      var worker = null;
+      try {
+        worker = lastNetDetails.filter(function (d) { return d && d.id === 'worker'; })[0];
+      } catch (e) {}
+      if (worker) {
+        applyNetSummaryFromWorker(worker);
+        return;
+      }
       const el = document.getElementById('netStatus');
       const tx = document.getElementById('netStatusText');
       if (!el || !tx) return;
@@ -22783,34 +23674,60 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         tx.textContent = '网络异常';
         return;
       }
-      // 摘要：可用接口中的最低延迟（代表「当前能走的最快通路」）
       var ms = Math.min.apply(null, okMs);
       lastNetMs = ms;
-      var cls = netClsForMs(ms);
-      el.className = 'net-status ' + cls;
+      el.className = 'net-status ' + netClsForMs(ms);
       tx.textContent = netLabelForMs(ms) + ' ' + ms + 'ms';
     }
 
+    /** 后台轻量：只测 Worker，更新右上角，不碰其它接口 */
+    async function probeWorkerOnly() {
+      if (netProbeBusy) return;
+      var panel = document.getElementById('netPanel');
+      if (panel && panel.classList.contains('show')) return; // 面板开着时不抢
+      var targets = typeof netTargets === 'function' ? netTargets() : [];
+      var t = null;
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i].id === 'worker') { t = targets[i]; break; }
+      }
+      if (!t) return;
+      try {
+        var d = await probeOneTarget(t);
+        applyNetSummaryFromWorker(d);
+      } catch (e) {}
+    }
+
+    /** 全量探测：仅面板打开 / 点刷新时调用 */
     async function probeNetworkLatency(forcePanel) {
       if (netProbeBusy) return;
       netProbeBusy = true;
       const targets = netTargets();
-      // 面板打开时先显示 pending
-      if (forcePanel || (document.getElementById('netPanel') || {}).classList.contains('show')) {
+      var panelOpen = forcePanel || !!(document.getElementById('netPanel') || {}).classList.contains('show');
+      // 仅「首次/无旧数据」时清空成 …；已有结果再刷新：保留旧数字，测完再替换（不闪空）
+      var hasPrev = lastNetDetails && lastNetDetails.length > 0 &&
+        lastNetDetails.some(function (d) { return d && (d.ms != null || (d.tag && d.tag !== '…')); });
+      if (panelOpen && !hasPrev) {
         lastNetDetails = targets.map(function (t) {
-          return { id: t.id, name: t.name, desc: t.desc, ms: null, ok: false, error: '…' };
+          return { id: t.id, name: t.name, desc: t.desc, ms: null, ok: false, error: '…', tag: '…' };
         });
         renderNetPanelBody();
+      } else if (panelOpen && hasPrev) {
+        // 脚注提示刷新中，列表仍显示上一轮
+        try { renderNetPanelBody(); } catch (eR) {}
       }
       try {
         const results = await Promise.all(targets.map(probeOneTarget));
         lastNetDetails = results;
         lastNetProbeAt = Date.now();
         applyNetSummary();
-        renderNetPanelBody();
+        if (panelOpen || (document.getElementById('netPanel') || {}).classList.contains('show')) {
+          renderNetPanelBody();
+        }
       } finally {
         netProbeBusy = false;
-        renderNetPanelBody();
+        if ((document.getElementById('netPanel') || {}).classList.contains('show')) {
+          renderNetPanelBody();
+        }
       }
     }
 
@@ -22827,24 +23744,21 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         mask.setAttribute('aria-hidden', on ? 'false' : 'true');
       }
       if (on) {
+        // 每次点开详情：全量刷新各接口
         renderNetPanelBody();
-        if (!lastNetProbeAt || Date.now() - lastNetProbeAt > 8000) {
-          probeNetworkLatency(true);
-        }
+        probeNetworkLatency(true);
       }
     }
 
     function startNetMonitor() {
       if (window.__netMonitorBound) return;
       window.__netMonitorBound = true;
-      // 捕获阶段统一处理：面板内点刷新只测速；面板外点才关闭且不穿透到股票
       document.addEventListener('click', function (e) {
         var panel = document.getElementById('netPanel');
         var status = document.getElementById('netStatus');
         var t = e.target;
         if (!t) return;
 
-        // 1) 点状态灯：开/关
         if (status && status.contains(t)) {
           e.preventDefault();
           e.stopPropagation();
@@ -22855,10 +23769,8 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
 
         if (!panel || !panel.classList.contains('show')) return;
 
-        // 2) 点在面板内部
         if (panel.contains(t)) {
           e.stopPropagation();
-          // 只有点到「刷新」才测速，绝不关面板
           var isRefresh = (t.id === 'netPanelRefresh') ||
             (t.closest && t.closest('#netPanelRefresh'));
           if (isRefresh) {
@@ -22869,15 +23781,25 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
           return;
         }
 
-        // 3) 点在面板外：只关闭，并拦住下层股票点击
         e.preventDefault();
         e.stopPropagation();
         if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         toggleNetPanel(false);
       }, true);
 
-      probeNetworkLatency();
-      setInterval(function () { probeNetworkLatency(false); }, 15000);
+      // 启动：只刷 Worker → 右上角
+      probeWorkerOnly();
+      // 定时：面板打开 → 全量刷新各接口；未打开 → 只刷 Worker
+      setInterval(function () {
+        try {
+          var panel = document.getElementById('netPanel');
+          if (panel && panel.classList.contains('show')) {
+            if (typeof probeNetworkLatency === 'function') probeNetworkLatency(true);
+          } else {
+            probeWorkerOnly();
+          }
+        } catch (e) {}
+      }, 15000);
     }
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', startNetMonitor);
