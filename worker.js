@@ -32,6 +32,7 @@ export default {
         hasDeepseek: !!env.DEEPSEEK_API_KEY,
         hasOpenAI: !!env.OPENAI_API_KEY,
         hasBrowse: !!env.browse,
+        hasMassive: !!(env.MASSIVE_API_KEY || env.POLYGON_API_KEY),
       });
     }
 
@@ -75,6 +76,70 @@ export default {
       }
     }
 
+
+    // Massive (原 Polygon) 美股报价备用
+    if (path === '/api/massive/quote' && request.method === 'GET') {
+      const symbol = (url.searchParams.get('symbol') || 'AAPL').toUpperCase().replace(/[^A-Z0-9.\-]/g, '');
+      const token = env.MASSIVE_API_KEY || env.POLYGON_API_KEY;
+      if (!token) return json({ error: 'MASSIVE_API_KEY not set' }, 501);
+      if (!symbol) return json({ error: 'missing symbol' }, 400);
+      try {
+        // 优先 snapshot；失败再 prev aggregate
+        const snapUrl =
+          'https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/' +
+          encodeURIComponent(symbol) +
+          '?apiKey=' +
+          encodeURIComponent(token);
+        let r = await fetch(snapUrl);
+        let data = await r.json().catch(function () { return null; });
+        let c = 0, pc = 0, o = 0, h = 0, l = 0;
+        if (data && data.ticker) {
+          const t = data.ticker;
+          const day = t.day || t.min || {};
+          const prev = t.prevDay || {};
+          c = Number(day.c || t.lastTrade && t.lastTrade.p || 0);
+          pc = Number(prev.c || 0);
+          o = Number(day.o || 0);
+          h = Number(day.h || 0);
+          l = Number(day.l || 0);
+        }
+        if (!(c > 0)) {
+          const prevUrl =
+            'https://api.polygon.io/v2/aggs/ticker/' +
+            encodeURIComponent(symbol) +
+            '/prev?adjusted=true&apiKey=' +
+            encodeURIComponent(token);
+          r = await fetch(prevUrl);
+          data = await r.json().catch(function () { return null; });
+          const row = data && data.results && data.results[0];
+          if (row) {
+            c = Number(row.c || 0);
+            o = Number(row.o || 0);
+            h = Number(row.h || 0);
+            l = Number(row.l || 0);
+            pc = Number(row.c || 0); // prev bar close as ref when only one bar
+          }
+        }
+        if (!(c > 0)) {
+          return json({ c: 0, error: 'no data', raw: data }, 404);
+        }
+        const d = pc > 0 ? c - pc : 0;
+        const dp = pc > 0 ? (d / pc) * 100 : 0;
+        return json({
+          c: c,
+          pc: pc > 0 ? pc : c,
+          d: d,
+          dp: dp,
+          o: o || c,
+          h: h || c,
+          l: l || c,
+          _src: 'massive',
+        });
+      } catch (e) {
+        return json({ error: String(e) }, 502);
+      }
+    }
+
     const apiResp = await handleApi(request, env, url);
     if (apiResp) return apiResp;
 
@@ -88,6 +153,7 @@ export default {
             health: '/health',
             proxy: '?url=https://...',
             quote: '/api/quote?symbol=AAPL',
+            massive: '/api/massive/quote?symbol=AAPL',
             bars: 'GET/POST /api/bars',
             predictions: '/api/predictions',
             positions: '/api/positions',
@@ -1325,9 +1391,9 @@ async function runSectorDailyJob(env) {
   const cnMeta = {};
   const cnStocks = {};
   const cnByL2 = {};
-  // 分批拉成分，温和：每批 2 个，批间隔 500ms
-  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 2) {
-    const batch = CN_BOARD_TREE.slice(bi, bi + 2);
+  // 分批拉成分，避免同时打爆东财（每批 5 个）
+  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 5) {
+    const batch = CN_BOARD_TREE.slice(bi, bi + 5);
     const results = await Promise.all(
       batch.map(function (node) {
         return fetchCnBoardMembers(node.board).then(function (members) {
@@ -1365,9 +1431,6 @@ async function runSectorDailyJob(env) {
         if (n > 0) boardMap[node.board].chg = Math.round(avg * 100) / 100;
       }
     });
-    if (bi + 2 < CN_BOARD_TREE.length) {
-      await new Promise(function (r) { setTimeout(r, 500); });
-    }
   }
 
   const boards = Object.keys(boardMap).map(function (k) {
