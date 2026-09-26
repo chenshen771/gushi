@@ -3555,6 +3555,29 @@ async function fetchQuote(symbol, opts) {
         if (q) return q;
         if (preferFinnhubOnly) return null;
 
+        // Massive / Polygon 备用（Worker 需 MASSIVE_API_KEY）
+        try {
+          if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+            var mUrl = WORKER_BASE.replace(/\?.*$/, '') + '/api/massive/quote?symbol=' + encodeURIComponent(sym);
+            var mRes = await (typeof fetchWithTimeoutSimple === 'function'
+              ? fetchWithTimeoutSimple(mUrl, 7000)
+              : fetch(mUrl, { cache: 'no-store' }));
+            if (mRes && mRes.ok) {
+              var mData = await mRes.json();
+              if (mData && typeof mData.c === 'number' && mData.c > 0) {
+                if (mData.pc > 0 && (mData.d == null || mData.dp == null)) {
+                  mData.d = mData.c - mData.pc;
+                  mData.dp = (mData.d / mData.pc) * 100;
+                }
+                try { if (typeof markQuoteRoute === 'function') markQuoteRoute(sym, 'massive'); } catch (eM) {}
+                return normalizeQuoteDailyChg(mData);
+              }
+            }
+          }
+        } catch (eMass) {
+          console.warn('massive quote', sym, eMass && eMass.message);
+        }
+
         // Yahoo 备用（与原先一致）
         try {
           const ySymQ = (typeof resolveYahooChartSymbol === 'function') ? resolveYahooChartSymbol(sym) : sym;
@@ -23421,6 +23444,14 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         list.push({ id: 'em_79', name: '东财节点79', desc: '东财备用节点 · 79.push2', url: em79Raw });
         list.push({ id: 'em_82', name: '东财节点82', desc: '东财备用节点 · 82.push2', url: em82Raw });
       }
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        list.push({
+          id: 'massive',
+          name: 'Massive',
+          desc: '美股报价备用 · Polygon',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '/health'
+        });
+      }
       list.push({
         id: 'em_dc',
         name: '东财数据中心',
@@ -23528,6 +23559,14 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       if (id === 'eastmoney') {
         if (j && j.data) return { ok: true, tag: '在线' };
         return { ok: false, tag: '无数据' };
+      }
+      if (id === 'massive') {
+        try {
+          var mj = JSON.parse(raw);
+          if (mj && mj.hasMassive) return { ok: true, tag: '已配置' };
+          if (mj && mj.ok) return { ok: false, tag: '无Key' };
+        } catch (eM) {}
+        return { ok: false, tag: '无Key' };
       }
       if (id === 'em_79' || id === 'em_82') {
         if (j && j.data && (j.data.total > 0 || (j.data.diff && (Array.isArray(j.data.diff) ? j.data.diff.length : Object.keys(j.data.diff).length)))) {
