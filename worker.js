@@ -163,8 +163,28 @@ export default {
       ) {
         hdrs.Referer = 'https://finance.qq.com/';
         hdrs.Accept = '*/*';
+      } else if (parsed.hostname.endsWith('.eastmoney.com')) {
+        // 东财对机房/云服务器 IP 有反爬拦截，不带 Referer 容易被直接拒绝
+        hdrs.Referer = 'https://quote.eastmoney.com/';
       }
-      const res = await fetch(target, { headers: hdrs });
+      let res;
+      try {
+        res = await fetch(target, { headers: hdrs });
+      } catch (e1) {
+        // 东财：直连失败时，同一份请求换个 Referer 再试一次，
+        // 不同 Referer 有时候被反爬名单区别对待
+        if (parsed.hostname.endsWith('.eastmoney.com')) {
+          try {
+            res = await fetch(target, {
+              headers: Object.assign({}, hdrs, { Referer: 'https://data.eastmoney.com/' }),
+            });
+          } catch (e2) {
+            throw e1;
+          }
+        } else {
+          throw e1;
+        }
+      }
       // 新浪/腾讯行情是 GBK；用 UTF-8 读会把中文名变成乱码
       const host = parsed.hostname || '';
       const isGbkHost =
