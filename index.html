@@ -15109,11 +15109,10 @@ function clearSectorRefreshSlowHint() {
       if (mkt === 'cn') {
         // 名称=实际入口，避免全叫东财分不清
         return [
-          { short: '线路1', full: '线路1·东财代理', tip: 'Worker→push2.eastmoney' },
-          { short: '线路2', full: '线路2·东财直连', tip: '浏览器直连 push2.eastmoney' },
-          { short: '线路3', full: '线路3·东财79/82', tip: '79/82.push2.eastmoney 备用节点' },
-          { short: '线路4', full: '线路4·新浪财经', tip: '成分东财·行情新浪 hq.sinajs.cn' },
-          { short: '线路5', full: '线路5·腾讯财经', tip: '成分东财·行情腾讯 qt.gtimg.cn' }
+          { short: '线路1', full: '线路1·东财代理', tip: 'Worker→东财；节点含 push2/79/82 等' },
+          { short: '线路2', full: '线路2·东财直连', tip: '直连东财；失败再试 79/82 等节点' },
+          { short: '线路3', full: '线路3·新浪财经', tip: '成分东财·行情新浪 hq.sinajs.cn' },
+          { short: '线路4', full: '线路4·腾讯财经', tip: '成分东财·行情腾讯 qt.gtimg.cn' }
         ];
       }
       return [
@@ -15136,7 +15135,8 @@ function clearSectorRefreshSlowHint() {
       var n = 1;
       try { n = getSectorRoute(mkt); } catch (e) {}
       if (mkt === 'us') return n === 0 || n === 1;
-      return n === 0 || n === 1 || n === 2;
+      // A股：仅东财代理/直连用东财树；新浪/腾讯不走东财归类全表
+      return n === 0 || n === 1;
     }
     function sectorRouteSourceName(mkt) {
       mkt = mkt === 'cn' ? 'cn' : 'us';
@@ -15147,9 +15147,8 @@ function clearSectorRefreshSlowHint() {
         if (n === 1) return '东财直连';
         return '东财代理';
       }
-      if (n === 3) return '新浪';
-      if (n === 4) return '腾讯';
-      if (n === 2) return '东财79/82';
+      if (n === 2) return '新浪';
+      if (n === 3) return '腾讯';
       if (n === 1) return '东财直连';
       return '东财代理';
     }
@@ -15207,7 +15206,7 @@ function clearSectorRefreshSlowHint() {
           defs = [
             { short: '线路1', full: '线路1·东财代理' },
             { short: '线路2', full: '线路2·东财直连' },
-            { short: '线路3', full: '线路3·东财79/82' },
+            { short: '线路3', full: '线路3·新浪财经' },
             { short: '线路4', full: '线路4·新浪财经' },
             { short: '线路5', full: '线路5·腾讯财经' }
           ];
@@ -15517,13 +15516,65 @@ async function onSectorRefreshClick() {
       if (!/[\u4e00-\u9fff]/.test(s) && s.length > 0) return true;
       return false;
     }
+
+
+    function emNodeHintFromUrl(u) {
+      try {
+        var s = String(u || '');
+        var via = s.indexOf('?url=') >= 0 || s.indexOf('&url=') >= 0;
+        var raw = s;
+        if (via) {
+          var m = s.match(/[?&]url=([^&]+)/);
+          if (m) raw = decodeURIComponent(m[1]);
+        }
+        var host = '';
+        try { host = new URL(raw).hostname || ''; } catch (e0) {
+          var m2 = raw.match(/https?:\/\/([^\/]+)/);
+          host = m2 ? m2[1] : '';
+        }
+        host = host.replace(/\.eastmoney\.com$/i, '');
+        if (host === 'push2delay') host = 'delay';
+        else if (host === 'push2') host = 'push2';
+        else host = host.replace(/\.push2$/i, '').replace(/push2\./i, '');
+        return (via ? '代理·' : '直连·') + host;
+      } catch (e) { return ''; }
+    }
+    function setSectorEmNodeHint(urlOrText, ok) {
+      try {
+        var h = urlOrText && String(urlOrText).indexOf('http') === 0
+          ? emNodeHintFromUrl(urlOrText)
+          : String(urlOrText || '');
+        if (!h) return;
+        window.__sectorEmNodeTry = h;
+        if (ok) window.__sectorEmNodeOk = h;
+        // 进度条文案带上当前节点（不改百分比与拉取顺序）
+        try {
+          if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.cn) {
+            var st = window.__sectorProgressByMkt && window.__sectorProgressByMkt.cn;
+            if (st && st.running && typeof showSectorProgress === 'function') {
+              var lab = String(st.label || 'A股刷新');
+              lab = lab.replace(/\s*·\s*(代理|直连)·[^·…]+/g, '');
+                            lab = lab.replace(/…+$/, '');
+              showSectorProgress('cn', st.loaded, st.total, lab + ' · ' + h + '…');
+            }
+          }
+        } catch (eUi) {}
+      } catch (e) {}
+    }
+    function sectorEmNodeSuffix() {
+      try {
+        var t = window.__sectorEmNodeTry || window.__sectorEmNodeOk || '';
+        return t ? (' · ' + t) : '';
+      } catch (e) { return ''; }
+    }
+
     async function enrichCNStocksWithAltQuotes(stocks, rtCn) {
       if (!stocks || !stocks.length) return { stocks: stocks || [], hit: 0, total: 0 };
       var codes = stocks.map(function (s) { return s.code; }).filter(Boolean);
       var qmap = {};
       try {
-        if (rtCn === 3) qmap = await fetchCNQuotesSina(codes);
-        else if (rtCn === 4) qmap = await fetchCNQuotesTencent(codes);
+        if (rtCn === 2) qmap = await fetchCNQuotesSina(codes);
+        else if (rtCn === 3) qmap = await fetchCNQuotesTencent(codes);
       } catch (e) { console.warn('alt quote', e); }
       var hit = 0;
       stocks.forEach(function (s) {
@@ -15679,14 +15730,17 @@ async function onSectorRefreshClick() {
             });
           } catch (e) {}
 
-          async function fetchAllBoardStocks(board) {
+          async function fetchAllBoardStocks(board, boardNameOpt) {
+            var rtCn0 = 1;
+            try { rtCn0 = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (e0) {}
             const stocks = [];
             async function fetchBoardPage(pn) {
               var hosts = [
                 'https://push2delay.eastmoney.com',
                 'https://push2.eastmoney.com',
+                'https://79.push2.eastmoney.com',
                 'https://82.push2.eastmoney.com',
-                'https://79.push2.eastmoney.com'
+                'https://16.push2.eastmoney.com'
               ];
               var path = '/api/qt/clist/get?pn=' + pn +
                 '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + board +
@@ -15694,20 +15748,15 @@ async function onSectorRefreshClick() {
               var urls = [];
               var rtCn = 1;
               try { rtCn = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (eRt) {}
-              // 线路2/3 调整东财域名顺序
-              if (rtCn === 2) {
-                hosts = [
-                  'https://79.push2.eastmoney.com',
-                  'https://82.push2.eastmoney.com',
-                  'https://push2.eastmoney.com',
-                  'https://push2delay.eastmoney.com'
-                ];
-              } else if (rtCn === 0 || rtCn === 1) {
+              // 东财线路1/2：主域名 + 79/82/16 等节点兜底（原线路3节点并入）
+              if (rtCn === 0 || rtCn === 1) {
                 hosts = [
                   'https://push2delay.eastmoney.com',
                   'https://push2.eastmoney.com',
+                  'https://79.push2.eastmoney.com',
                   'https://82.push2.eastmoney.com',
-                  'https://79.push2.eastmoney.com'
+                  'https://16.push2.eastmoney.com',
+                  'https://94.push2.eastmoney.com'
                 ];
               }
               hosts.forEach(function (h) {
@@ -15725,8 +15774,8 @@ async function onSectorRefreshClick() {
                   if (viaW) urls.push(viaW);
                 }
               });
-              // 线路4/5：成分名单仍用东财；行情由新浪/腾讯覆盖
-              if (rtCn >= 3) {
+              // 线路3/4：成分名单仍用东财；行情由新浪/腾讯覆盖
+              if (rtCn >= 2) {
                 urls = [];
                 hosts.forEach(function (h) {
                   var u = h + path;
@@ -15738,6 +15787,10 @@ async function onSectorRefreshClick() {
               }
               for (let pi = 0; pi < urls.length; pi++) {
                 try {
+                  try { if (typeof setSectorEmNodeHint === 'function') setSectorEmNodeHint(urls[pi], false); } catch (eNh) {}
+                  if (pi > 0) {
+                    await new Promise(function (r) { setTimeout(r, 300); });
+                  }
                   const res = await (typeof fetchWithTimeoutSimple === 'function'
                     ? fetchWithTimeoutSimple(urls[pi], 12000)
                     : fetch(urls[pi]));
@@ -15748,6 +15801,7 @@ async function onSectorRefreshClick() {
                   }
                   const diff = data && data.data && data.data.diff;
                   if (Array.isArray(diff) && diff.length) {
+                    try { if (typeof setSectorEmNodeHint === 'function') setSectorEmNodeHint(urls[pi], true); } catch (eOk) {}
                     return {
                       list: diff.map(function (it) {
                         return {
@@ -15785,7 +15839,7 @@ async function onSectorRefreshClick() {
             try {
               var rtQ = 1;
               try { rtQ = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (eR) {}
-              if ((rtQ === 3 || rtQ === 4) && stocks.length && typeof enrichCNStocksWithAltQuotes === 'function') {
+              if ((rtQ === 2 || rtQ === 3) && stocks.length && typeof enrichCNStocksWithAltQuotes === 'function') {
                 var en = await enrichCNStocksWithAltQuotes(stocks, rtQ);
                 if (en && en.stocks) stocks = en.stocks;
                 if (en && en.hit === 0 && stocks.length > 5) {
@@ -15831,7 +15885,8 @@ async function onSectorRefreshClick() {
           }
           // 统计各细分只数（并入总进度 0–5%；并行拉 meta，加快准备阶段）
           {
-            const META_CONC = 5;
+            // 温和：低并发 + 批间隔，降低东财限流/502
+            const META_CONC = 2;
             let metaDone = 0;
             for (let bi = 0; bi < boards.length; bi += META_CONC) {
               if (myTok !== window.__sectorRefreshTok.cn) return;
@@ -15850,6 +15905,9 @@ async function onSectorRefreshClick() {
                 showCnUnified(statPct, (isNewDayCn ? '最新数据更新中' : 'A股刷新') +
                   ' · 准备 ' + metaDone + '/' + boards.length + '…');
               }));
+              if (bi + META_CONC < boards.length) {
+                await new Promise(function (r) { setTimeout(r, 500); });
+              }
             }
           }
           let stockTotal = 0;
@@ -15879,11 +15937,12 @@ async function onSectorRefreshClick() {
           let stockLoaded = 0;
           let boardsDone = 0;
           showCnUnified(5, (isNewDayCn ? '最新数据更新中' : 'A股刷新') +
-            ' · 成分股 0/' + lockedTotal + '…');
+            ' · 成分股 0/' + lockedTotal +
+            ((typeof sectorEmNodeSuffix === 'function') ? sectorEmNodeSuffix() : '') + '…');
 
-          // 阶段1：成分股（约 5%→90%）；多板块并行（BOARD_CONC），比串行快很多
+          // 阶段1：成分股（约 5%→90%）；温和：低并发 + 批间隔 500ms
           {
-            const BOARD_CONC = 3;
+            const BOARD_CONC = 2;
             for (let bi = 0; bi < boards.length; bi += BOARD_CONC) {
               if (myTok !== window.__sectorRefreshTok.cn) return;
               const batch = boards.slice(bi, bi + BOARD_CONC);
@@ -15893,13 +15952,20 @@ async function onSectorRefreshClick() {
                   try {
                     if (window.__cnBoardMeta) delete window.__cnBoardMeta[item.board];
                   } catch (e0) {}
-                  var pack = await fetchAllBoardStocks(item.board);
+                  var pack = await fetchAllBoardStocks(item.board, item.name);
                   var stocks = (pack && pack.stocks) || [];
                   if (!stocks.length) {
                     await new Promise(function (r) { setTimeout(r, 500); });
-                    pack = await fetchAllBoardStocks(item.board);
+                    pack = await fetchAllBoardStocks(item.board, item.name);
                     stocks = (pack && pack.stocks) || [];
                   }
+                  try {
+                    var rtQ2 = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1;
+                    if ((rtQ2 === 2 || rtQ2 === 3) && stocks.length && typeof enrichCNStocksWithAltQuotes === 'function') {
+                      var en2 = await enrichCNStocksWithAltQuotes(stocks, rtQ2);
+                      if (en2 && en2.stocks) stocks = en2.stocks;
+                    }
+                  } catch (eEn2) {}
                   window.__cnBoardStocksCache = window.__cnBoardStocksCache || {};
                   window.__cnBoardStocksCache[item.board] = {
                     list: stocks,
@@ -15937,8 +16003,12 @@ async function onSectorRefreshClick() {
                 if (boardsDone >= boards.length) stockPct = 90;
                 var showN = Math.min(stockLoaded, lockedTotal);
                 showCnUnified(stockPct, (isNewDayCn ? '最新数据更新中' : 'A股刷新') +
-                  ' · ' + (item.name || item.board) + ' · ' + showN + '/' + lockedTotal + '…');
+                  ' · ' + (item.name || item.board) + ' · ' + showN + '/' + lockedTotal +
+                  ((typeof sectorEmNodeSuffix === 'function') ? sectorEmNodeSuffix() : '') + '…');
               }));
+              if (bi + BOARD_CONC < boards.length) {
+                await new Promise(function (r) { setTimeout(r, 500); });
+              }
             }
           }
           showCnUnified(90, (isNewDayCn ? '最新数据更新中' : 'A股刷新') +
@@ -19372,6 +19442,10 @@ async function openCNSectorStocks(boardCode, sectorName, isRestore) {
               });
               for (let pi = 0; pi < urls.length; pi++) {
                 try {
+                  try { if (typeof setSectorEmNodeHint === 'function') setSectorEmNodeHint(urls[pi], false); } catch (eNh) {}
+                  if (pi > 0) {
+                    await new Promise(function (r) { setTimeout(r, 300); });
+                  }
                   const res = await (typeof fetchWithTimeoutSimple === 'function'
                     ? fetchWithTimeoutSimple(urls[pi], 12000)
                     : fetch(urls[pi]));
@@ -19382,6 +19456,7 @@ async function openCNSectorStocks(boardCode, sectorName, isRestore) {
                   }
                   const diff = data && data.data && data.data.diff;
                   if (Array.isArray(diff) && diff.length) {
+                    try { if (typeof setSectorEmNodeHint === 'function') setSectorEmNodeHint(urls[pi], true); } catch (eOk) {}
                     return {
                       list: diff.map(function (it) {
                         return {
@@ -23326,6 +23401,26 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
           url: emUsRaw
         });
       }
+      // 线路3：79/82 数字节点（与 push2 同接口，换入口）
+      var em79Raw = 'https://79.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=3&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:0+t:6&fields=f12,f14,f2,f3&_=' + Date.now();
+      var em82Raw = 'https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=3&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:0+t:6&fields=f12,f14,f2,f3&_=' + Date.now();
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        list.push({
+          id: 'em_79',
+          name: '东财节点79',
+          desc: '东财备用节点 · 79.push2',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(em79Raw)
+        });
+        list.push({
+          id: 'em_82',
+          name: '东财节点82',
+          desc: '东财备用节点 · 82.push2',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(em82Raw)
+        });
+      } else {
+        list.push({ id: 'em_79', name: '东财节点79', desc: '东财备用节点 · 79.push2', url: em79Raw });
+        list.push({ id: 'em_82', name: '东财节点82', desc: '东财备用节点 · 82.push2', url: em82Raw });
+      }
       list.push({
         id: 'em_dc',
         name: '东财数据中心',
@@ -23339,26 +23434,26 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         list.push({
           id: 'sina',
           name: '新浪财经',
-          desc: 'A股线路4 行情 · 经代理',
+          desc: 'A股线路3 行情 · 经代理',
           url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(sinaRaw)
         });
         list.push({
           id: 'tencent',
           name: '腾讯财经',
-          desc: 'A股线路5 行情 · 经代理',
+          desc: 'A股线路4 行情 · 经代理',
           url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(tencentRaw)
         });
       } else {
         list.push({
           id: 'sina',
           name: '新浪财经',
-          desc: 'A股线路4 行情 · 直连',
+          desc: 'A股线路3 行情 · 直连',
           url: sinaRaw
         });
         list.push({
           id: 'tencent',
           name: '腾讯财经',
-          desc: 'A股线路5 行情 · 直连',
+          desc: 'A股线路4 行情 · 直连',
           url: tencentRaw
         });
       }
@@ -23431,6 +23526,13 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         return { ok: false, tag: '无数据' };
       }
       if (id === 'eastmoney') {
+        if (j && j.data) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'em_79' || id === 'em_82') {
+        if (j && j.data && (j.data.total > 0 || (j.data.diff && (Array.isArray(j.data.diff) ? j.data.diff.length : Object.keys(j.data.diff).length)))) {
+          return { ok: true, tag: '在线' };
+        }
         if (j && j.data) return { ok: true, tag: '在线' };
         return { ok: false, tag: '无数据' };
       }
