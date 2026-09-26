@@ -32,7 +32,6 @@ export default {
         hasDeepseek: !!env.DEEPSEEK_API_KEY,
         hasOpenAI: !!env.OPENAI_API_KEY,
         hasBrowse: !!env.browse,
-        hasTushare: !!env.TUSHARE_TOKEN,
       });
     }
 
@@ -76,38 +75,6 @@ export default {
       }
     }
 
-    // Tushare Pro 代理：POST /api/tushare  body: { api_name, params, fields }
-    if (path === '/api/tushare' && request.method === 'POST') {
-      const token = env.TUSHARE_TOKEN;
-      if (!token) return json({ ok: false, error: 'TUSHARE_TOKEN not set' }, 501);
-      try {
-        const body = await request.json();
-        const api_name = body && body.api_name;
-        if (!api_name) return json({ ok: false, error: 'api_name required' }, 400);
-        const payload = {
-          api_name: api_name,
-          token: token,
-          params: (body && body.params) || {},
-          fields: (body && body.fields) || '',
-        };
-        const r = await fetch('https://api.tushare.pro', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const data = await r.json();
-        return new Response(JSON.stringify(Object.assign({ ok: !(data && data.code) || data.code === 0 }, data)), {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Access-Control-Allow-Origin': '*',
-          },
-        });
-      } catch (e) {
-        return json({ ok: false, error: String(e) }, 502);
-      }
-    }
-
     const apiResp = await handleApi(request, env, url);
     if (apiResp) return apiResp;
 
@@ -121,7 +88,6 @@ export default {
             health: '/health',
             proxy: '?url=https://...',
             quote: '/api/quote?symbol=AAPL',
-            tushare: 'POST /api/tushare (需 TUSHARE_TOKEN)',
             bars: 'GET/POST /api/bars',
             predictions: '/api/predictions',
             positions: '/api/positions',
@@ -159,7 +125,6 @@ export default {
       '79.push2.eastmoney.com',
       '82.push2.eastmoney.com',
       '94.push2.eastmoney.com',
-      '16.push2.eastmoney.com',
       'np-listapi.eastmoney.com',
       'datacenter-web.eastmoney.com',
       'datacenter.eastmoney.com',
@@ -1360,9 +1325,9 @@ async function runSectorDailyJob(env) {
   const cnMeta = {};
   const cnStocks = {};
   const cnByL2 = {};
-  // 分批拉成分，避免同时打爆东财（每批 5 个）
-  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 5) {
-    const batch = CN_BOARD_TREE.slice(bi, bi + 5);
+  // 分批拉成分，温和：每批 2 个，批间隔 500ms
+  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 2) {
+    const batch = CN_BOARD_TREE.slice(bi, bi + 2);
     const results = await Promise.all(
       batch.map(function (node) {
         return fetchCnBoardMembers(node.board).then(function (members) {
@@ -1400,6 +1365,9 @@ async function runSectorDailyJob(env) {
         if (n > 0) boardMap[node.board].chg = Math.round(avg * 100) / 100;
       }
     });
+    if (bi + 2 < CN_BOARD_TREE.length) {
+      await new Promise(function (r) { setTimeout(r, 500); });
+    }
   }
 
   const boards = Object.keys(boardMap).map(function (k) {
