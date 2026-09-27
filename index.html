@@ -685,6 +685,28 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 8px;
+    }
+    .watch-status-left {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .watch-status .market-cal-hint {
+      margin-left: 6px;
+      font-size: inherit;
+      font-weight: inherit;
+      color: var(--muted);
+      flex-shrink: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .watch-status #fhWsBadge {
+      flex-shrink: 0;
+      white-space: nowrap;
     }
     .watch-stats {
       font-size: 0.72rem;
@@ -1884,7 +1906,7 @@
       <button onclick="addSymbol()">添加</button>
     </div>
     <div class="watch-status">
-      <span id="updateTime">准备就绪</span>
+      <span class="watch-status-left"><span id="updateTime">准备就绪</span><span id="marketCalHint" class="market-cal-hint"></span></span>
     </div>
     <div class="watch-stats" id="watchStats">共 0 只 · 美股 0 · A股 0</div>
     <div class="session-progress" id="sessionProgress" style="display:none;">
@@ -4072,7 +4094,352 @@ async function fetchQuote(symbol, opts) {
     }
 
     
-    // ---------- 今日参考（示意，非预测） ----------
+
+    // ---------- 交易所休市日历（内置 + 可选联网）----------
+    // 休市日历：仅联网填充（美股 Massive / A股 holiday-cn），不使用本地写死表
+    window.__mktHolidayUS = window.__mktHolidayUS || {};
+    window.__mktHolidayCN = window.__mktHolidayCN || {};
+    window.__mktHolidayNetAt = window.__mktHolidayNetAt || 0;
+    window.__mktHolidayNetOk = window.__mktHolidayNetOk || { us: false, cn: false };
+
+    function mktYmdInTz(tz) {
+      try {
+        return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      } catch (e) {
+        var d = new Date();
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }
+    }
+    function mktUsHolidayNameZh(name) {
+      var n = String(name || '').trim();
+      if (!n) return '休市';
+      var low = n.toLowerCase();
+      var map = {
+        'new year': '元旦', "new year's day": '元旦', 'new years day': '元旦',
+        'martin luther king': '马丁路德金日', 'martin luther king jr. day': '马丁路德金日',
+        'martin luther king, jr. day': '马丁路德金日', 'mlk day': '马丁路德金日',
+        "washington's birthday": '总统日', 'presidents day': '总统日', "presidents' day": '总统日',
+        'good friday': '耶稣受难日',
+        'memorial day': '阵亡将士日',
+        'juneteenth': '六月节', 'juneteenth national independence day': '六月节',
+        'independence day': '独立日',
+        'labor day': '劳工节',
+        'thanksgiving': '感恩节', 'thanksgiving day': '感恩节',
+        'christmas': '圣诞节', 'christmas day': '圣诞节',
+        'columbus day': '哥伦布日',
+        'veterans day': '退伍军人节'
+      };
+      if (map[low]) return map[low];
+      // 模糊包含
+      var keys = Object.keys(map);
+      for (var i = 0; i < keys.length; i++) {
+        if (low.indexOf(keys[i]) >= 0 || keys[i].indexOf(low) >= 0) return map[keys[i]];
+      }
+      if (/new\s*year/i.test(n)) return '元旦';
+      if (/martin\s*luther|mlk/i.test(n)) return '马丁路德金日';
+      if (/president/i.test(n) || /washington/i.test(n)) return '总统日';
+      if (/good\s*friday/i.test(n)) return '耶稣受难日';
+      if (/memorial/i.test(n)) return '阵亡将士日';
+      if (/juneteenth/i.test(n)) return '六月节';
+      if (/independence/i.test(n)) return '独立日';
+      if (/labor\s*day/i.test(n)) return '劳工节';
+      if (/thanks/i.test(n)) return '感恩节';
+      if (/christmas/i.test(n)) return '圣诞节';
+      return n;
+    }
+    function mktHolidayName(mkt, ymd) {
+      if (!ymd) return null;
+      if (mkt === 'cn') return (window.__mktHolidayCN && window.__mktHolidayCN[ymd]) || null;
+      return (window.__mktHolidayUS && window.__mktHolidayUS[ymd]) || null;
+    }
+    function mktIsWeekendYmd(ymd, tz) {
+      try {
+        var p = ymd.split('-').map(Number);
+        var utc = new Date(Date.UTC(p[0], p[1] - 1, p[2], 12, 0, 0));
+        var wd = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(utc);
+        return wd === 'Sat' || wd === 'Sun';
+      } catch (e) { return false; }
+    }
+    function mktAddDaysYmd(ymd, n) {
+      var p = ymd.split('-').map(Number);
+      var dt = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+      return dt.getUTCFullYear() + '-' + String(dt.getUTCMonth() + 1).padStart(2, '0') + '-' + String(dt.getUTCDate()).padStart(2, '0');
+    }
+    function mktNextTradeYmd(mkt, fromYmd) {
+      var tz = mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York';
+      var ymd = fromYmd;
+      for (var i = 0; i < 21; i++) {
+        ymd = mktAddDaysYmd(ymd, 1);
+        if (mktIsWeekendYmd(ymd, tz)) continue;
+        if (mktHolidayName(mkt, ymd)) continue;
+        return ymd;
+      }
+      return null;
+    }
+    function mktFmtYmdShort(ymd) {
+      if (!ymd) return '';
+      var p = ymd.split('-');
+      return parseInt(p[1], 10) + '/' + parseInt(p[2], 10);
+    }
+    function mktDaysBetween(a, b) {
+      try {
+        var da = a.split('-').map(Number), db = b.split('-').map(Number);
+        return Math.round((Date.UTC(db[0], db[1] - 1, db[2]) - Date.UTC(da[0], da[1] - 1, da[2])) / 86400000);
+      } catch (e) { return 0; }
+    }
+    function mktWatchFocus() {
+      try {
+        var list = (typeof watchlist !== 'undefined' && watchlist) ? watchlist : [];
+        var usN = 0, cnN = 0;
+        list.forEach(function (s) {
+          if (typeof isAShareSymbol === 'function' && isAShareSymbol(s)) cnN++;
+          else usN++;
+        });
+        return cnN > usN ? 'cn' : 'us';
+      } catch (e) { return 'us'; }
+    }
+    function getMarketCalHintText() {
+      try {
+        // 优先顺序：按「接下来轮到谁」——A股先开 → A股时段 → 美股时段 → 周末看最近节日
+        // 收盘「下开N天」仅收盘后约1小时有效，之后改显示最近休市节日
+        function closedNow(mkt) {
+          var tz = mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York';
+          var ymd = mktYmdInTz(tz);
+          if (mktHolidayName(mkt, ymd)) return { kind: 'holiday', name: mktHolidayName(mkt, ymd), ymd: ymd, tz: tz };
+          if (mktIsWeekendYmd(ymd, tz)) return { kind: 'weekend', ymd: ymd, tz: tz };
+          var sess = mkt === 'cn'
+            ? (typeof getCNSessionProgress === 'function' ? getCNSessionProgress() : null)
+            : (typeof getUSSessionProgress === 'function' ? getUSSessionProgress() : null);
+          if (!sess) return null;
+          if (sess.open) return null;
+          if (sess.pre) return { kind: 'pre', ymd: ymd, tz: tz };
+          if (sess.lunch) return { kind: 'lunch', ymd: ymd, tz: tz };
+          if (sess.after) return { kind: 'after', ymd: ymd, tz: tz };
+          // 未识别时段：不默认午休（避免凌晨被标成午休盖住节日）
+          return { kind: 'after', ymd: ymd, tz: tz };
+        }
+        function nextHol(mkt, fromYmd, includeToday) {
+          var startI = includeToday ? 0 : 1;
+          for (var i = startI; i < 60; i++) {
+            var y = i === 0 ? fromYmd : mktAddDaysYmd(fromYmd, i);
+            var n = mktHolidayName(mkt, y);
+            if (n) return { ymd: y, name: n, days: mktDaysBetween(fromYmd, y), mkt: mkt };
+          }
+          return null;
+        }
+        function nearestHoliday() {
+          var usY = mktYmdInTz('America/New_York');
+          var cnY = mktYmdInTz('Asia/Shanghai');
+          var usH = nextHol('us', usY, false);
+          var cnH = nextHol('cn', cnY, false);
+          if (usH && cnH) return (cnH.days <= usH.days) ? cnH : usH;
+          return usH || cnH || null;
+        }
+        function minsInTz(tz) {
+          try {
+            var fmt = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+            var parts = fmt.formatToParts(new Date());
+            var map = {};
+            parts.forEach(function (p) { map[p.type] = p.value; });
+            var h = parseInt(map.hour, 10); if (h === 24) h = 0;
+            var mi = parseInt(map.minute, 10) || 0;
+            return h * 60 + mi;
+          } catch (e) { return -1; }
+        }
+        function minsToOpen(tz) {
+          var nowM = minsInTz(tz);
+          if (nowM < 0) return -1;
+          return (9 * 60 + 30) - nowM;
+        }
+        function fmtToOpen(mins) {
+          if (!(mins > 0)) return '';
+          var hh = Math.floor(mins / 60);
+          var mm = mins % 60;
+          if (hh > 0) return hh + 'h' + (mm > 0 ? mm + 'm' : '');
+          return mm + 'm';
+        }
+        function daysToNextOpen(mkt, ymd) {
+          var next = mktNextTradeYmd(mkt, ymd);
+          if (!next) return 0;
+          return mktDaysBetween(ymd, next);
+        }
+        function fmtHolidayHint(h) {
+          if (!h) return '';
+          var label = h.mkt === 'cn' ? 'A股' : '美股';
+          var name = h.name || '休市';
+          if (h.mkt === 'us' && typeof mktUsHolidayNameZh === 'function') {
+            name = mktUsHolidayNameZh(name);
+          }
+          if (name.length <= 3 && name.indexOf('节') < 0 && name !== '休市') name = name + '节';
+          if (name.length > 8) name = name.slice(0, 8);
+          if (h.days === 0) return ' · ' + label + ' · ' + name;
+          return ' · ' + label + ' · ' + name + h.days + '天后';
+        }
+        /** 收盘后是否仍在 1 小时「已收盘」提示有效期内 */
+        function afterCloseWithin1h(mkt) {
+          var tz = mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York';
+          var nowM = minsInTz(tz);
+          if (nowM < 0) return false;
+          var closeM = mkt === 'cn' ? (15 * 60) : (16 * 60);
+          return nowM >= closeM && nowM < closeM + 60;
+        }
+        /**
+         * 按交易日时间线选「当前该提示谁」：
+         * A股未开/盘中/午休 → A股；A股已收且美股未开或盘中 → 美股；都休市 → 最近节日
+         */
+        function pickActiveMarket() {
+          var cn = closedNow('cn');
+          var us = closedNow('us');
+          var cnOpen = (typeof isCNMarketSessionOpen === 'function') && isCNMarketSessionOpen();
+          var usOpen = (typeof isUSMarketSessionOpen === 'function') && isUSMarketSessionOpen();
+
+          // 盘中：不占「更新于」旁文案（进度条负责）
+          if (cnOpen) return { mkt: 'cn', pick: null, open: true };
+          if (usOpen) return { mkt: 'us', pick: null, open: true };
+
+          // A股午休 / 开盘前 → 优先 A股
+          if (cn && (cn.kind === 'lunch' || cn.kind === 'pre')) {
+            return { mkt: 'cn', pick: cn };
+          }
+          // A股今日节日/周末：若美股还在交易日开盘前或盘中逻辑已在上面；若美股也休，走节日
+          if (cn && (cn.kind === 'holiday' || cn.kind === 'weekend')) {
+            // 美股若仍是交易日 pre（北京夜晚美股未开）→ 提示美股距开盘
+            if (us && us.kind === 'pre') return { mkt: 'us', pick: us };
+            if (us && us.kind === 'after' && afterCloseWithin1h('us')) return { mkt: 'us', pick: us };
+            return { mkt: 'cn', pick: cn, preferHoliday: true };
+          }
+          // A股已收盘
+          if (cn && cn.kind === 'after') {
+            if (afterCloseWithin1h('cn')) return { mkt: 'cn', pick: cn };
+            // 1小时后：轮到美股
+            if (us && us.kind === 'pre') return { mkt: 'us', pick: us };
+            if (us && us.kind === 'after' && afterCloseWithin1h('us')) return { mkt: 'us', pick: us };
+            if (us && (us.kind === 'holiday' || us.kind === 'weekend')) {
+              return { mkt: 'us', pick: us, preferHoliday: true };
+            }
+            // 美股也过了收盘提示窗 → 最近节日
+            return { mkt: 'us', pick: us || cn, preferHoliday: true };
+          }
+          // 仅美股侧有状态
+          if (us && us.kind === 'pre') return { mkt: 'us', pick: us };
+          if (us && us.kind === 'after' && afterCloseWithin1h('us')) return { mkt: 'us', pick: us };
+          if (us) return { mkt: 'us', pick: us, preferHoliday: true };
+          if (cn) return { mkt: 'cn', pick: cn, preferHoliday: true };
+          return null;
+        }
+
+        var act = pickActiveMarket();
+        if (!act) return '';
+        if (act.open) return '';
+        var pick = act.pick;
+        var mkt = act.mkt;
+        var label = mkt === 'cn' ? 'A股' : '美股';
+        if (!pick) return '';
+
+        // 周末/节日 或 收盘提示已过有效期 → 显示「离今天最近」的休市节日，过了就下一个
+        if (pick.kind === 'holiday' || pick.kind === 'weekend' || act.preferHoliday) {
+          if (pick.kind === 'holiday' && pick.name && !act.preferHoliday) {
+            var nm0 = pick.name;
+            if (mkt === 'us' && typeof mktUsHolidayNameZh === 'function') nm0 = mktUsHolidayNameZh(nm0);
+            if (nm0.length <= 3 && nm0.indexOf('节') < 0) nm0 = nm0 + '节';
+            if (nm0.length > 8) nm0 = nm0.slice(0, 8);
+            return ' · ' + label + ' · ' + nm0;
+          }
+          var near = nearestHoliday();
+          if (near) return fmtHolidayHint(near);
+          return ' · ' + label + '休市';
+        }
+        if (pick.kind === 'lunch') return ' · A股午休';
+        if (pick.kind === 'pre') {
+          var left = minsToOpen(pick.tz || (mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York'));
+          // 仅开盘前 5 小时内显示倒计时，更早仍显示最近休市节日
+          if (left > 0 && left <= 5 * 60) {
+            var t = fmtToOpen(left);
+            if (t) return ' · 距' + label + '开盘 ' + t;
+            return ' · 距' + label + '开盘';
+          }
+          var nearPre = nearestHoliday();
+          if (nearPre) return fmtHolidayHint(nearPre);
+          return ' · ' + label + '休市';
+        }
+        if (pick.kind === 'after') {
+          // 仅 1 小时有效
+          if (!afterCloseWithin1h(mkt)) {
+            var near2 = nearestHoliday();
+            if (near2) return fmtHolidayHint(near2);
+            return '';
+          }
+          var d = daysToNextOpen(mkt, pick.ymd);
+          if (d > 0) return ' · ' + label + '已收盘 · 下开' + d + '天后';
+          return ' · ' + label + '已收盘';
+        }
+        return '';
+      } catch (e) { return ''; }
+    }
+
+    async function refreshMarketHolidayNet() {
+      // A股：NateScarlet/holiday-cn（国务院放假 isOffDay）
+      // 美股：Massive/Polygon /v1/marketstatus/upcoming（经 Worker）
+      try {
+        var yNow = new Date().getFullYear();
+        var years = [yNow, yNow + 1];
+        var cnMap = {};
+        for (var yi = 0; yi < years.length; yi++) {
+          try {
+            var cnUrl = 'https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/' + years[yi] + '.json';
+            var cnRes = await fetch(cnUrl, { cache: 'no-store' });
+            if (!cnRes || !cnRes.ok) continue;
+            var cnJ = await cnRes.json();
+            var days = (cnJ && cnJ.days) || [];
+            for (var di = 0; di < days.length; di++) {
+              var d = days[di];
+              if (!d || !d.date) continue;
+              if (d.isOffDay === true) {
+                cnMap[d.date] = d.name || '休市';
+              }
+            }
+          } catch (eCn) {
+            console.warn('holiday-cn', years[yi], eCn);
+          }
+        }
+        if (Object.keys(cnMap).length) {
+          window.__mktHolidayCN = cnMap;
+          window.__mktHolidayNetOk.cn = true;
+        }
+      } catch (e1) {
+        console.warn('cn holiday net', e1);
+      }
+      try {
+        if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+          var usUrl = WORKER_BASE.replace(/\?.*$/, '') + '/api/massive/holidays';
+          var usRes = await (typeof fetchWithTimeoutSimple === 'function'
+            ? fetchWithTimeoutSimple(usUrl, 10000)
+            : fetch(usUrl, { cache: 'no-store' }));
+          if (usRes && usRes.ok) {
+            var usJ = await usRes.json();
+            if (usJ && usJ.ok && usJ.holidays && typeof usJ.holidays === 'object') {
+              var usMap = {};
+              Object.keys(usJ.holidays).forEach(function (dt) {
+                var raw = usJ.holidays[dt];
+                usMap[dt] = (typeof mktUsHolidayNameZh === 'function') ? mktUsHolidayNameZh(raw) : raw;
+              });
+              window.__mktHolidayUS = usMap;
+              window.__mktHolidayNetOk.us = true;
+            }
+          }
+        }
+      } catch (e2) {
+        console.warn('us holiday net', e2);
+      }
+      window.__mktHolidayNetAt = Date.now();
+      try {
+        if (typeof paintWatchStatus === 'function') paintWatchStatus();
+      } catch (e3) {}
+    }
+    // 日历变化很少：仅进入页面时拉一次，临近开盘文案用本地时钟算，不再定时重拉
+    try { setTimeout(function () { refreshMarketHolidayNet(); }, 800); } catch (e0) {}
+
+
     function isUSMarketSessionOpen() {
       try {
         const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -4087,6 +4454,7 @@ async function fetchQuote(symbol, opts) {
         parts.forEach(function (p) { map[p.type] = p.value; });
         const wd = (map.weekday || '').slice(0, 3);
         if (wd === 'Sat' || wd === 'Sun') return false;
+        if (typeof mktHolidayName === 'function' && mktHolidayName('us', mktYmdInTz('America/New_York'))) return false;
         let h = parseInt(map.hour, 10);
         if (h === 24) h = 0;
         const m = parseInt(map.minute, 10) || 0;
@@ -4114,7 +4482,12 @@ async function fetchQuote(symbol, opts) {
         parts.forEach(function (p) { map[p.type] = p.value; });
         const wd = (map.weekday || '').slice(0, 3);
         if (wd === 'Sat' || wd === 'Sun') {
-          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 390 };
+          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 390, weekend: true };
+        }
+        var ymdUS = (typeof mktYmdInTz === 'function') ? mktYmdInTz('America/New_York') : '';
+        var holUS = (typeof mktHolidayName === 'function') ? mktHolidayName('us', ymdUS) : null;
+        if (holUS) {
+          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 390, holiday: true, holidayName: holUS };
         }
         let h = parseInt(map.hour, 10);
         if (map.hour === '24') h = 0;
@@ -4162,7 +4535,12 @@ async function fetchQuote(symbol, opts) {
         parts.forEach(function (p) { map[p.type] = p.value; });
         const wd = (map.weekday || '').slice(0, 3);
         if (wd === 'Sat' || wd === 'Sun') {
-          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 240 };
+          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 240, weekend: true };
+        }
+        var ymdCN = (typeof mktYmdInTz === 'function') ? mktYmdInTz('Asia/Shanghai') : '';
+        var holCN = (typeof mktHolidayName === 'function') ? mktHolidayName('cn', ymdCN) : null;
+        if (holCN) {
+          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 240, holiday: true, holidayName: holCN };
         }
         let h = parseInt(map.hour, 10);
         if (map.hour === '24') h = 0;
@@ -4173,35 +4551,41 @@ async function fetchQuote(symbol, opts) {
         const pmOpen = 13 * 60, pmClose = 15 * 60;
         const total = 240; // 4h
 
-        function pack(elapsed, left, isOpen) {
-          return {
+        function pack(elapsed, left, isOpen, extra) {
+          var o = {
             open: !!isOpen,
             elapsed01: Math.max(0, Math.min(1, elapsed / total)),
             remain01: Math.max(0, Math.min(1, left / total)),
             minsLeft: left,
             minsOpen: elapsed
           };
+          if (extra) {
+            if (extra.pre) o.pre = true;
+            if (extra.after) o.after = true;
+            if (extra.lunch) o.lunch = true;
+          }
+          return o;
         }
 
         if (mins < amOpen) {
-          return pack(0, total, false);
+          return pack(0, total, false, { pre: true });
         }
         if (mins >= amOpen && mins < amClose) {
           const elapsed = mins - amOpen;
           const left = (amClose - mins) + 120; // 还含下午整段
           return pack(elapsed, left, true);
         }
-        // 午休：不算开盘波动时段，进度停在上午结束
+        // 午休：11:30–13:00
         if (mins >= amClose && mins < pmOpen) {
-          return pack(120, 120, false);
+          return pack(120, 120, false, { lunch: true });
         }
         if (mins >= pmOpen && mins < pmClose) {
           const elapsed = 120 + (mins - pmOpen);
           const left = pmClose - mins;
           return pack(elapsed, left, true);
         }
-        // 已收盘
-        return pack(total, 0, false);
+        // 已收盘（15:00 后）
+        return pack(total, 0, false, { after: true });
       } catch (e) {
         return { open: false, elapsed01: 0.5, remain01: 0.5, minsLeft: 120, minsOpen: 120 };
       }
@@ -4222,6 +4606,7 @@ async function fetchQuote(symbol, opts) {
         parts.forEach(function (p) { map[p.type] = p.value; });
         const wd = (map.weekday || '').slice(0, 3);
         if (wd === 'Sat' || wd === 'Sun') return false;
+        if (typeof mktHolidayName === 'function' && mktHolidayName('cn', mktYmdInTz('Asia/Shanghai'))) return false;
         let h = parseInt(map.hour, 10);
         if (h === 24) h = 0;
         const m = parseInt(map.minute, 10) || 0;
@@ -6231,6 +6616,12 @@ async function fetchQuote(symbol, opts) {
       } else {
         timeEl.textContent = '实时更新 ' + t;
       }
+      try {
+        var hintEl = document.getElementById('marketCalHint');
+        if (hintEl && typeof getMarketCalHintText === 'function') {
+          hintEl.textContent = getMarketCalHintText() || '';
+        }
+      } catch (eH) {}
       renderSessionProgress();
     }
 
@@ -23448,8 +23839,8 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         list.push({
           id: 'massive',
           name: 'Massive',
-          desc: '美股报价备用 · Polygon',
-          url: WORKER_BASE.replace(/\?.*$/, '') + '/health'
+          desc: '美股报价备用 · 探测 AAPL',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '/api/massive/quote?symbol=AAPL'
         });
       }
       list.push({
@@ -23563,10 +23954,11 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       if (id === 'massive') {
         try {
           var mj = JSON.parse(raw);
-          if (mj && mj.hasMassive) return { ok: true, tag: '已配置' };
-          if (mj && mj.ok) return { ok: false, tag: '无Key' };
+          if (mj && typeof mj.c === 'number' && mj.c > 0) return { ok: true, tag: '在线' };
+          if (mj && (mj.error || '').indexOf('not set') >= 0) return { ok: false, tag: '无Key' };
+          if (status === 501) return { ok: false, tag: '无Key' };
         } catch (eM) {}
-        return { ok: false, tag: '无Key' };
+        return { ok: false, tag: '502' };
       }
       if (id === 'em_79' || id === 'em_82') {
         if (j && j.data && (j.data.total > 0 || (j.data.diff && (Array.isArray(j.data.diff) ? j.data.diff.length : Object.keys(j.data.diff).length)))) {
