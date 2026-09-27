@@ -140,6 +140,39 @@ export default {
       }
     }
 
+
+    // Massive/Polygon 美股休市日历（观察列表用）
+    if (path === '/api/massive/holidays' && request.method === 'GET') {
+      const token = env.MASSIVE_API_KEY || env.POLYGON_API_KEY;
+      if (!token) return json({ ok: false, error: 'MASSIVE_API_KEY not set' }, 501);
+      try {
+        const api =
+          'https://api.polygon.io/v1/marketstatus/upcoming?apiKey=' +
+          encodeURIComponent(token);
+        const r = await fetch(api);
+        const data = await r.json().catch(function () { return null; });
+        if (!r.ok) {
+          return json(
+            { ok: false, error: (data && data.error) || ('HTTP ' + r.status), raw: data },
+            r.status >= 400 ? r.status : 502
+          );
+        }
+        const arr = Array.isArray(data) ? data : [];
+        const map = {};
+        arr.forEach(function (h) {
+          if (!h || !h.date) return;
+          const ex = String(h.exchange || '').toUpperCase();
+          if (ex && ex !== 'NYSE' && ex !== 'NASDAQ') return;
+          const st = String(h.status || '').toLowerCase();
+          if (st && st !== 'closed') return;
+          if (!map[h.date]) map[h.date] = h.name || '休市';
+        });
+        return json({ ok: true, source: 'massive', holidays: map });
+      } catch (e) {
+        return json({ ok: false, error: String(e) }, 502);
+      }
+    }
+
     const apiResp = await handleApi(request, env, url);
     if (apiResp) return apiResp;
 
@@ -154,6 +187,7 @@ export default {
             proxy: '?url=https://...',
             quote: '/api/quote?symbol=AAPL',
             massive: '/api/massive/quote?symbol=AAPL',
+            massiveHolidays: '/api/massive/holidays',
             bars: 'GET/POST /api/bars',
             predictions: '/api/predictions',
             positions: '/api/positions',
@@ -1391,9 +1425,9 @@ async function runSectorDailyJob(env) {
   const cnMeta = {};
   const cnStocks = {};
   const cnByL2 = {};
-  // 分批拉成分，避免同时打爆东财（每批 5 个）
-  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 5) {
-    const batch = CN_BOARD_TREE.slice(bi, bi + 5);
+  // 分批拉成分，温和：每批 2 个，批间隔 500ms
+  for (let bi = 0; bi < CN_BOARD_TREE.length; bi += 2) {
+    const batch = CN_BOARD_TREE.slice(bi, bi + 2);
     const results = await Promise.all(
       batch.map(function (node) {
         return fetchCnBoardMembers(node.board).then(function (members) {
@@ -1431,6 +1465,9 @@ async function runSectorDailyJob(env) {
         if (n > 0) boardMap[node.board].chg = Math.round(avg * 100) / 100;
       }
     });
+    if (bi + 2 < CN_BOARD_TREE.length) {
+      await new Promise(function (r) { setTimeout(r, 500); });
+    }
   }
 
   const boards = Object.keys(boardMap).map(function (k) {
