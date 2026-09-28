@@ -14940,8 +14940,12 @@ const FALLBACK_SECTORS = {
         el.style.color = 'var(--orange)';
         return;
       }
-      // 板块无 Finnhub WS，用实时刷新指示（绿点样式对齐观察列表，不显示时间）
-      el.innerHTML = '<span style="color:var(--green);">●</span> 实时刷新';
+      // 板块默认不后台狂刷：显示「已缓存」；真正 fullRefresh 时再改成更新中
+      if (window.__sectorRefreshBusy && (window.__sectorRefreshBusy.us || window.__sectorRefreshBusy.cn)) {
+        el.innerHTML = '<span style="color:var(--orange);">●</span> 更新中';
+      } else {
+        el.innerHTML = '<span style="color:var(--green);">●</span> 已缓存';
+      }
       el.style.color = 'var(--green)';
       window.__sectorLiveAt = Date.now();
     }
@@ -16611,18 +16615,7 @@ async function onSectorRefreshClick() {
               if (typeof renderUSSectorL1 === 'function') await renderUSSectorL1(false);
             } catch (eR) {}
             try { window.__sectorSwitchRestoreUS = false; } catch (eF) {}
-            try {
-              if (typeof usEmClassIsRich === 'function' && !usEmClassIsRich() && !window.__usOpenFullOnce) {
-                window.__usOpenFullOnce = true;
-                setTimeout(function () {
-                  try {
-                    if (sectorMarket !== 'us') return;
-                    if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) return;
-                    if (typeof fullRefreshSectors === 'function') fullRefreshSectors();
-                  } catch (eFR) {}
-                }, 300);
-              }
-            } catch (eAuto) {}
+            // 无完整数据也不再自动全量刷新；请用户点「刷新」
           }
         })();
         return;
@@ -17722,31 +17715,12 @@ async function onSectorRefreshClick() {
                 }
               }
             } catch (eEarly) {}
+            // 不自动「加载完整美股板块 / 全量刷新」——只用本地/云端已有数据展示
+            // 需要完整数据时由用户点「刷新」手动触发
             if (!rich) {
               try {
-                if (typeof setSectorToast === 'function') setSectorToast(true, '正在加载完整美股板块…', 90000, 'us');
-              } catch (eT0) {}
-              try {
-                if (typeof loadEMUSUniverse === 'function') await loadEMUSUniverse(true);
-              } catch (eEm) {}
-              try {
-                if (typeof classifyEmUSIntoSectors === 'function') classifyEmUSIntoSectors();
-              } catch (eCl) {}
-              try {
-                if (typeof persistSectorCloudFull === 'function') await persistSectorCloudFull('open-fill');
-              } catch (ePs) {}
-              try { window.__sectorNewDayForcePaint = true; } catch (eFp2) {}
-              // 仍不完整时再兜底全量（极少）
-              if (typeof usEmClassIsRich === 'function' && !usEmClassIsRich() && !window.__usOpenFullOnce) {
-                window.__usOpenFullOnce = true;
-                setTimeout(function () {
-                  try {
-                    if (sectorMarket !== 'us') return;
-                    if (window.__sectorRefreshBusy && window.__sectorRefreshBusy.us) return;
-                    if (typeof fullRefreshSectors === 'function') fullRefreshSectors();
-                  } catch (eFR) {}
-                }, 400);
-              }
+                if (typeof paintSectorLiveStatus === 'function') paintSectorLiveStatus('ok');
+              } catch (eSt) {}
             }
           } catch (eHyd) {}
           // 美股：全量刷新进行中时不要并行再刷，避免两套数字来回跳
@@ -18964,6 +18938,7 @@ async function onSectorRefreshClick() {
             q = getEmUSQuote(sym);
             if (!q || !(q.c > 0)) {
               try {
+                // 第5条保留：后台静默补东财全市场表（不弹「正在加载完整…」）
                 if (!emUSMapFresh() && !window.__emUSLoadBusy) {
                   loadEMUSUniverse(false).catch(function () {});
                 }
@@ -23882,38 +23857,8 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       });
     }, 1200);
 
-    // 停留在「板块」页时，定时原地刷新当前显示的这一级（一级大类概览、
-    // 或二级细分行业列表都算），loadSectors() 本身会先判断当前停在哪一级、
-    // 哪个市场，只原地刷新那一级，不会跳回大类列表。
-    // 这里没有做成跟观察列表一样「每秒」：观察列表只盯着你自选的几只股票，
-    // 靠 WebSocket 推送，不用不断发请求；板块页一次要聚合好几只股票算平均
-    // 涨跌——一级页要顺着 7 个大类各抽样几只、二级页也要挨个细分行业抽样，
-    // 如果做成每秒一次，等于每秒都要连续打一串行情请求，免费行情接口的
-    // 额度撑不住这个频率，撑爆了不只板块刷不出来，连观察列表自己都会被
-    // 拖累刷不出数据。所以这里用 15 秒一次：肉眼仍能感觉到数字隔一会儿
-    // 在动，但不会把接口打挂。
-    setInterval(function () {
-      const page = document.getElementById('page-sector');
-      if (page && page.classList.contains('active')) {
-        try {
-          if (window.__sectorRefreshBusy && (window.__sectorRefreshBusy.us || window.__sectorRefreshBusy.cn)) return;
-        } catch (eB) {}
-        // A股：约每 90 秒自动全量一次，一级角标/涨跌不用点刷新也会更新
-        try {
-          if (typeof sectorMarket !== 'undefined' && sectorMarket === 'cn') {
-            window.__cnAutoFullTicks = (window.__cnAutoFullTicks || 0) + 1;
-            if (window.__cnAutoFullTicks >= 6) {
-              window.__cnAutoFullTicks = 0;
-              if (typeof fullRefreshSectors === 'function') {
-                fullRefreshSectors();
-                return;
-              }
-            }
-          }
-        } catch (eFull) {}
-        loadSectors(false);
-      }
-    }, 15000);
+    // 板块页：不再 15s/90s 自动刷新（用户反馈一直「加载完整…」）。
+    // 需要更新时点右上角「刷新」即可；跨日仍由下面的新一天检测处理。
 
     // 应用一直开着跨过 0 点：检测到新一天 → 全量刷新（进度条文案为「最新数据更新中」）
     setInterval(function () {
