@@ -229,6 +229,9 @@ export default {
       'datacenter-web.eastmoney.com',
       'datacenter.eastmoney.com',
       'finance.eastmoney.com',
+      'data.eastmoney.com',
+      'www.eastmoney.com',
+      'quote.eastmoney.com',
       'finnhub.io',
       'www.federalreserve.gov',
       'federalreserve.gov',
@@ -265,7 +268,11 @@ export default {
         hdrs.Accept = '*/*';
       } else if (parsed.hostname.endsWith('.eastmoney.com')) {
         // 东财对机房/云服务器 IP 有反爬拦截，不带 Referer 容易被直接拒绝
-        hdrs.Referer = 'https://quote.eastmoney.com/';
+        if (parsed.hostname === 'data.eastmoney.com' || parsed.pathname.indexOf('bkzj') >= 0) {
+          hdrs.Referer = 'https://data.eastmoney.com/bkzj/hy.html';
+        } else {
+          hdrs.Referer = 'https://quote.eastmoney.com/';
+        }
       }
       let res;
       try {
