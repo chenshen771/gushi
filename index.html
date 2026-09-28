@@ -4272,8 +4272,9 @@ async function fetchQuote(symbol, opts) {
           }
           if (name.length <= 3 && name.indexOf('节') < 0 && name !== '休市') name = name + '节';
           if (name.length > 8) name = name.slice(0, 8);
-          if (h.days === 0) return ' · ' + label + ' · ' + name;
-          return ' · ' + label + ' · ' + name + h.days + '天后';
+          // 例：A股休市 · 国庆节3天后
+          if (h.days === 0) return ' · ' + label + '休市 · ' + name;
+          return ' · ' + label + '休市 · ' + name + h.days + '天后';
         }
         /** 收盘后是否仍在 1 小时「已收盘」提示有效期内 */
         function afterCloseWithin1h(mkt) {
@@ -4348,7 +4349,7 @@ async function fetchQuote(symbol, opts) {
             if (mkt === 'us' && typeof mktUsHolidayNameZh === 'function') nm0 = mktUsHolidayNameZh(nm0);
             if (nm0.length <= 3 && nm0.indexOf('节') < 0) nm0 = nm0 + '节';
             if (nm0.length > 8) nm0 = nm0.slice(0, 8);
-            return ' · ' + label + ' · ' + nm0;
+            return ' · ' + label + '休市 · ' + nm0;
           }
           var near = nearestHoliday();
           if (near) return fmtHolidayHint(near);
