@@ -4330,7 +4330,12 @@ async function fetchQuote(symbol, opts) {
 
         var act = pickActiveMarket();
         if (!act) return '';
-        if (act.open) return '';
+        // 盘中/开盘进度条负责时段；右侧仍可提示「近期下一个休市节日」
+        if (act.open) {
+          var nearOpen = nearestHoliday();
+          if (nearOpen) return fmtHolidayHint(nearOpen);
+          return '';
+        }
         var pick = act.pick;
         var mkt = act.mkt;
         var label = mkt === 'cn' ? 'A股' : '美股';
@@ -20578,7 +20583,7 @@ function normalizeAShareCode(sym) {
       return String(it.symbol || it.event || '') + '|' + String(it.date || '') + '|' + (it.isMacro ? 'm' : 's') + '|' + (it.fromWatch ? 'w' : '');
     }
 
-    function writeCalPageCache(mkt, html, pastHtml, pastCount, watchHtml, watchCount, items) {
+    function writeCalPageCache(mkt, html, pastHtml, pastCount, watchHtml, watchCount, items, newsHints) {
       try {
         const day = calLocalDayStr();
         const prev = readCalPageCache(mkt);
@@ -20623,8 +20628,43 @@ function normalizeAShareCode(sym) {
           if (da !== db) return da > db ? -1 : 1;
           return 0;
         });
+        // 美股缓存：不存「一般」非自选财报
+        if (mkt === 'us') {
+          try {
+            var ws = {};
+            var listW = (typeof watchlist !== 'undefined' && Array.isArray(watchlist)) ? watchlist : [];
+            listW.forEach(function (s) {
+              var k = String(s || '').toUpperCase().trim();
+              if (k && !/(\d{6})/.test(k)) ws[k] = true;
+            });
+            merged = merged.filter(function (it) {
+              if (!it || it.isMacro || it.noSchedule) return true;
+              if (!it.symbol) return true;
+              var sym = String(it.symbol).toUpperCase().trim();
+              if (it.fromWatch || ws[sym]) return true;
+              if (typeof CAL_HIGH !== 'undefined' && CAL_HIGH.has(sym)) return true;
+              if (typeof CAL_MID !== 'undefined' && CAL_MID.has(sym)) return true;
+              return false;
+            });
+          } catch (eUs) {}
+        }
+        // 历史超过约 31 天的条目可丢，一个月内保留不因跨天整包作废
+        try {
+          var cut = new Date();
+          cut.setDate(cut.getDate() - 31);
+          var cutStr = cut.getFullYear() + '-' + String(cut.getMonth() + 1).padStart(2, '0') + '-' + String(cut.getDate()).padStart(2, '0');
+          merged = merged.filter(function (it) {
+            if (!it || !it.date) return true;
+            return String(it.date).slice(0, 10) >= cutStr;
+          });
+        } catch (eCut) {}
         if (merged.length > CAL_PAGE_CACHE_MAX) merged = merged.slice(0, CAL_PAGE_CACHE_MAX);
-        localStorage.setItem(CAL_PAGE_CACHE_PREFIX + mkt, JSON.stringify({
+        var keepNews = [];
+        try {
+          if (Array.isArray(newsHints) && newsHints.length) keepNews = newsHints.slice(0, 12);
+          else if (prev && Array.isArray(prev.newsHints) && prev.newsHints.length) keepNews = prev.newsHints.slice(0, 12);
+        } catch (eN) {}
+        var payload = {
           ts: Date.now(),
           day: day,
           html: html || '',
@@ -20632,10 +20672,36 @@ function normalizeAShareCode(sym) {
           pastCount: pastCount != null ? pastCount : (prev && prev.pastCount) || 0,
           watchHtml: watchHtml != null ? watchHtml : (prev && prev.watchHtml) || '',
           watchCount: watchCount != null ? watchCount : (prev && prev.watchCount) || 0,
-          items: merged
-        }));
+          items: merged,
+          newsHints: keepNews
+        };
+        localStorage.setItem(CAL_PAGE_CACHE_PREFIX + mkt, JSON.stringify(payload));
         try { localStorage.removeItem('cal_page_v1_' + mkt); } catch (e2) {}
+        // 同步一份到 D1，供换设备/清本地后恢复
+        try {
+          if (typeof cloudCacheSetBg === 'function') {
+            cloudCacheSetBg('cal:page:' + mkt, payload, 35);
+          } else if (typeof cloudCacheSet === 'function') {
+            cloudCacheSet('cal:page:' + mkt, payload, 35);
+          }
+        } catch (eCloud) {}
       } catch (e) {}
+    }
+
+    async function hydrateCalPageCacheFromCloud(mkt) {
+      try {
+        if (readCalPageCache(mkt)) return readCalPageCache(mkt);
+        if (typeof cloudCacheGet !== 'function') return null;
+        var wrap = await cloudCacheGet('cal:page:' + mkt);
+        var data = wrap && (wrap.data || wrap.value || wrap);
+        if (!data || !data.html) return null;
+        try {
+          localStorage.setItem(CAL_PAGE_CACHE_PREFIX + mkt, JSON.stringify(data));
+        } catch (eL) {}
+        return data;
+      } catch (e) {
+        return null;
+      }
     }
 
     function applyCalCacheToWindow(cached) {
@@ -20790,22 +20856,42 @@ function normalizeAShareCode(sym) {
       const container = document.getElementById('calList');
       if (!container) return;
       const mkt = (calMarket === 'cn') ? 'cn' : 'us';
-      // 先不急着弹提示条——等真的开始一条条拉取、有具体数字了
-      // （下面 paintCalUpdatingHint(count)）再显示，不要出现「更新中」
-      // 但看不出数字、像是卡住了的那种空提示
-      // 有缓存先上屏；当天的缓存直接当真、不用再发请求——只有跨天了
-      // 或者用户手动点了刷新（force）才会真的再去拉一次
+      // 缓存策略：
+      // - 本地 + D1 双写；一个月内历史合并保留，不因跨天整包作废
+      // - 本地空 → 先从数据库(D1)恢复
+      // - 有数据：本会话每个市场最多自动联网刷新 1 次（切 Tab 不再刷）
+      // - 手动刷新 force 仍全量重拉
+      window.__calSessionAuto = window.__calSessionAuto || { us: false, cn: false };
       try {
-        const cached0 = readCalPageCache(mkt);
+        var cached0 = readCalPageCache(mkt);
+        if ((!cached0 || !cached0.html) && typeof hydrateCalPageCacheFromCloud === 'function') {
+          try {
+            cached0 = await hydrateCalPageCacheFromCloud(mkt);
+          } catch (eHyd) {}
+        }
         if (cached0 && cached0.html) {
-          if (!container.querySelector('.cal-item')) paintCalMarketShell(mkt);
-          else applyCalCacheToWindow(cached0);
-          if (cached0.day && cached0.day !== calLocalDayStr()) {
-            force = true; // 跨天了，缓存过期，强制刷新一次
-          } else if (!force) {
-            // 当天的缓存还新鲜：已经加载过了，直接用缓存显示，不用再重新加载
-            clearCalUpdatingHint();
-            return;
+          try {
+            if (!container.querySelector('.cal-item')) {
+              container.innerHTML = cached0.html;
+            } else {
+              // 已有内容时不强行整页替换，只同步 past/watch 状态
+            }
+            if (!container.querySelector('.cal-item')) {
+              container.innerHTML = cached0.html;
+            }
+            applyCalCacheToWindow(cached0);
+          } catch (ePaint) {
+            try { container.innerHTML = cached0.html; applyCalCacheToWindow(cached0); } catch (e2) {}
+          }
+          if (!force) {
+            if (window.__calSessionAuto[mkt]) {
+              // 本会话已自动刷新过：切界面回来只读缓存
+              clearCalUpdatingHint();
+              return;
+            }
+            // 有数据：本会话第一次进入该市场 → 后台自动刷新一次
+            window.__calSessionAuto[mkt] = true;
+            // 不 return，继续往下联网更新
           }
         } else if (!container.querySelector('.cal-item')) {
           paintCalMarketShell(mkt);
@@ -20834,6 +20920,10 @@ function normalizeAShareCode(sym) {
 
       // 走到这里才是真的要开一条新的抓取（要么没有在跑的，要么是强制刷新）——
       // 这时候才分配新序号，让旧的那条（如果还没跑完）知道自己已经被顶替。
+      try {
+        window.__calSessionAuto = window.__calSessionAuto || { us: false, cn: false };
+        if (!force) window.__calSessionAuto[mkt] = true;
+      } catch (eAuto) {}
       const seq = ++__calLoadSeq[mkt];
       const runner = (mkt === 'cn') ? loadCalendarCN(seq, force) : loadCalendarUS(seq, force);
       __calInFlight[mkt] = runner;
@@ -20867,14 +20957,12 @@ function normalizeAShareCode(sym) {
         if (e && isWatchSym(e.symbol)) e.fromWatch = true;
       });
 
+      // 只保留：自选 + 高/中重要（龙头/宏观关注池）；「一般」不相关财报不展示
       const watchItems = (earnings || []).filter(function (e) { return e.fromWatch || isWatchSym(e.symbol); });
       const focus = (earnings || []).filter(function (e) {
         return !e.fromWatch && !isWatchSym(e.symbol) && (CAL_HIGH.has(e.symbol) || CAL_MID.has(e.symbol));
       });
-      const rest = (earnings || []).filter(function (e) {
-        return !e.fromWatch && !isWatchSym(e.symbol) && !CAL_HIGH.has(e.symbol) && !CAL_MID.has(e.symbol);
-      }).slice(0, 40);
-      const merged = watchItems.concat(focus).concat(rest).slice(0, 80);
+      const merged = watchItems.concat(focus).slice(0, 80);
 
       // 收集全部事件（财报 + 宏观），再按「今天起 / 历史」拆分
       const todayStr = (() => {
@@ -21143,30 +21231,132 @@ function normalizeAShareCode(sym) {
         // 这样切回来至少能看到最新一次进度，而不是更旧的快照。
         if (loading) {
           try {
-            writeCalPageCache('us', built.html, built.pastHtml, built.pastCount, built.watchHtml, built.watchCount, built.allItems);
+            // 加载中若本轮几乎没财报，不要用空壳覆盖本地已有完整缓存
+            var prevW = readCalPageCache('us');
+            var nItems = (built.allItems && built.allItems.length) || 0;
+            var prevN = (prevW && prevW.items && prevW.items.length) || 0;
+            if (nItems > 0 || prevN < 3) {
+              writeCalPageCache('us', built.html, built.pastHtml, built.pastCount, built.watchHtml, built.watchCount, built.allItems, hints);
+            }
           } catch (e) {}
         }
         return built;
       }
       function isUSStale() { return !isCalLoadCurrent(seq, 'us'); }
 
-      if (force || !readCalPageCache('us') || !container.querySelector('.cal-item')) {
-        paintUS([], [], true);
-      }
-
+      // 刷新时不要先画空列表（会把已有财报/新闻冲掉）；有缓存先顶着旧数据
       let earnings = [];
       let newsHints = [];
+      let prevCache = null;
       try {
-        earnings = await withTimeout(fetchEarningsCalendar().catch(function () { return []; }), 10000, []);
+        prevCache = readCalPageCache('us');
+        if (prevCache && Array.isArray(prevCache.newsHints) && prevCache.newsHints.length) {
+          newsHints = prevCache.newsHints.slice();
+        }
+        // 从缓存 items 恢复财报行，加载中继续显示
+        if (prevCache && Array.isArray(prevCache.items) && prevCache.items.length) {
+          var wset = {};
+          (watchUS || []).forEach(function (s) {
+            var k = String(s || '').toUpperCase().trim();
+            if (k) wset[k] = true;
+          });
+          prevCache.items.forEach(function (it) {
+            if (!it || it.isMacro || it.noSchedule) return;
+            if (!it.symbol || !it.date) return;
+            var sym = String(it.symbol).toUpperCase().trim();
+            var keep = !!it.fromWatch || !!wset[sym] || (typeof CAL_HIGH !== 'undefined' && CAL_HIGH.has(sym)) || (typeof CAL_MID !== 'undefined' && CAL_MID.has(sym));
+            if (!keep) return;
+            earnings.push({
+              symbol: sym,
+              name: it.name || sym,
+              date: it.date,
+              hour: it.hour || '',
+              fromWatch: !!it.fromWatch || !!wset[sym],
+              market: 'us',
+              reportType: it.reportType || ''
+            });
+          });
+        }
+      } catch (ePrevN) {}
+      if (!container.querySelector('.cal-item')) {
+        if (prevCache && prevCache.html) {
+          try {
+            container.innerHTML = prevCache.html;
+            applyCalCacheToWindow(prevCache);
+          } catch (eH) {
+            paintUS(earnings, newsHints, true);
+          }
+        } else {
+          paintUS(earnings, newsHints, true);
+        }
+      } else if (earnings.length || newsHints.length) {
+        paintUS(earnings, newsHints, true);
+      }
+
+      // 不再拉 Finnhub「全市场」财报日历（流量大、一堆无关股）
+      // 只按：自选美股 + 高/中重要名单，逐个 symbol 查询
+      try {
+        var targetSyms = {};
+        (watchUS || []).forEach(function (s) {
+          var k = String(s || '').toUpperCase().trim();
+          if (k) targetSyms[k] = true;
+        });
+        try {
+          CAL_HIGH.forEach(function (s) { targetSyms[String(s).toUpperCase()] = true; });
+          CAL_MID.forEach(function (s) { targetSyms[String(s).toUpperCase()] = true; });
+        } catch (eSet) {}
+        var symList = Object.keys(targetSyms);
+        if (symList.length && typeof fetchUSEarningsForSymbols === 'function') {
+          var freshEarn = await withTimeout(
+            fetchUSEarningsForSymbols(symList, isUSStale, function (partial) {
+              var emapP = {};
+              (earnings || []).forEach(function (e) {
+                if (e && e.symbol && e.date) emapP[String(e.symbol).toUpperCase() + '_' + e.date] = e;
+              });
+              (partial || []).forEach(function (e) {
+                if (!e || !e.symbol) return;
+                e.symbol = String(e.symbol).toUpperCase().trim();
+                var wk = {};
+                (watchUS || []).forEach(function (s) {
+                  var kk = String(s || '').toUpperCase().trim();
+                  if (kk) wk[kk] = true;
+                });
+                e.fromWatch = !!wk[e.symbol];
+                emapP[e.symbol + '_' + (e.date || '')] = e;
+              });
+              var mergedP = Object.keys(emapP).map(function (k) { return emapP[k]; });
+              paintUS(mergedP, newsHints, true);
+              paintCalUpdatingHint(mergedP.length);
+            }).catch(function () { return []; }),
+            90000,
+            []
+          );
+          if (freshEarn && freshEarn.length) {
+            var emap = {};
+            (earnings || []).forEach(function (e) {
+              if (e && e.symbol && e.date) emap[String(e.symbol).toUpperCase() + '_' + e.date] = e;
+            });
+            var wk2 = {};
+            (watchUS || []).forEach(function (s) {
+              var k = String(s || '').toUpperCase().trim();
+              if (k) wk2[k] = true;
+            });
+            freshEarn.forEach(function (e) {
+              if (!e || !e.symbol) return;
+              e.symbol = String(e.symbol).toUpperCase().trim();
+              e.fromWatch = !!wk2[e.symbol];
+              emap[e.symbol + '_' + (e.date || '')] = e;
+            });
+            earnings = Object.keys(emap).map(function (k) { return emap[k]; });
+          }
+        }
       } catch (e) {
         console.error(e);
-        earnings = [];
       }
-      // 财报主列表一到手就先展示一版（自选缺口 / 新闻线索还在后台继续拉），
-      // 这样美股也能像 A 股一样边加载边展示，而不是转圈到底才一次性出现。
-      paintUS(earnings, [], true);
+      paintUS(earnings, newsHints, true);
 
       try {
+        // 占位逻辑仍需要 have 集合（下方自选无日程）
         const have = {};
         (earnings || []).forEach(function (e) {
           if (!e || !e.symbol) return;
@@ -21175,25 +21365,11 @@ function normalizeAShareCode(sym) {
         });
         const watchSetNow = {};
         (watchUS || []).forEach(function (s) { const k = String(s || '').toUpperCase().trim(); if (k) watchSetNow[k] = true; });
-        const missing = (watchUS || []).filter(function (s) {
-          return !have[String(s || '').toUpperCase().trim()];
-        });
-        if (missing.length && typeof fetchUSEarningsForSymbols === 'function') {
-          const extra = await withTimeout(
-            fetchUSEarningsForSymbols(missing, isUSStale, function (partial) {
-              // 自选逐个查完一个就重画一次，而不是等 20 个都查完才更新
-              const merged = earnings.concat(partial);
-              paintUS(merged, [], true);
-              paintCalUpdatingHint(merged.length);
-            }).catch(function () { return []; }),
-            15000, []
-          );
+        // 已在上面按自选+名单拉过，这里不再二次全量/缺漏重拉
+        if (false && typeof fetchUSEarningsForSymbols === 'function') {
+          const missing = [];
+          const extra = [];
           if (extra && extra.length) {
-            extra.forEach(function (e) {
-              if (!e) return;
-              e.symbol = String(e.symbol || '').toUpperCase().trim();
-              e.fromWatch = true;
-            });
             earnings = (earnings || []).concat(extra);
           }
         }
@@ -21221,14 +21397,16 @@ function normalizeAShareCode(sym) {
       } catch (e) { console.warn('watch us cal', e); }
 
       try {
-        newsHints = await withTimeout(fetchNewsCalendarHints().catch(function () { return []; }), 8000, []);
-      } catch (e) { newsHints = []; }
+        var freshNews = await withTimeout(fetchNewsCalendarHints().catch(function () { return []; }), 12000, []);
+        // 新拉到有内容才替换；失败或空列表 → 保留上一份新闻线索
+        if (freshNews && freshNews.length) newsHints = freshNews;
+      } catch (e) { /* 保留 newsHints 旧值 */ }
 
       // 注意：这里不再因为 tab 已切走就提前 return——后面还要把 html 拼完并写入缓存，
       // 否则切走这一步做的所有请求就白跑了，回来还要重新拉一遍。
       const built = buildUSCalHtml(earnings || [], watchUS, newsHints || [], { loading: false });
       try {
-        writeCalPageCache('us', built.html, built.pastHtml, built.pastCount, built.watchHtml, built.watchCount, built.allItems);
+        writeCalPageCache('us', built.html, built.pastHtml, built.pastCount, built.watchHtml, built.watchCount, built.allItems, newsHints);
       } catch (err) {
         console.warn('us cal cache write', err);
       }
@@ -21408,7 +21586,8 @@ function normalizeAShareCode(sym) {
       const from = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
       const to = new Date(now.getTime() + 45 * 86400000).toISOString().slice(0, 10);
       const out = [];
-      const uniq = symbols.slice(0, 20);
+      // 仅自选+高中重要，上限放宽；避免再走全市场日历接口
+      const uniq = symbols.slice(0, 80);
       for (let i = 0; i < uniq.length; i++) {
         // 注意：这里的 isStale 只用于判断「这条抓取本身是否已经被更新的同市场加载顶替」，
         // 不再因为用户切去了别的 tab/市场就中断——让它把自选逐个查完。
