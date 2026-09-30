@@ -159,15 +159,51 @@ export default {
         }
         const arr = Array.isArray(data) ? data : [];
         const map = {};
+        const early = {};
+        function closeMinsFromItem(h) {
+          // Polygon early-close 常带 close ISO；缺省按美东 13:00
+          try {
+            if (h.close) {
+              const d = new Date(h.close);
+              if (!isNaN(d.getTime())) {
+                const fmt = new Intl.DateTimeFormat('en-GB', {
+                  timeZone: 'America/New_York',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false
+                });
+                const parts = fmt.formatToParts(d);
+                const o = {};
+                parts.forEach(function (p) { o[p.type] = p.value; });
+                let hh = parseInt(o.hour, 10);
+                if (hh === 24) hh = 0;
+                const mm = parseInt(o.minute, 10) || 0;
+                return hh * 60 + mm;
+              }
+            }
+          } catch (e) {}
+          return 13 * 60;
+        }
         arr.forEach(function (h) {
           if (!h || !h.date) return;
           const ex = String(h.exchange || '').toUpperCase();
           if (ex && ex !== 'NYSE' && ex !== 'NASDAQ') return;
           const st = String(h.status || '').toLowerCase();
-          if (st && st !== 'closed') return;
-          if (!map[h.date]) map[h.date] = h.name || '休市';
+          if (st === 'closed') {
+            if (!map[h.date]) map[h.date] = h.name || '休市';
+            return;
+          }
+          // early-close / early_close / earlyclose
+          if (st === 'early-close' || st === 'early_close' || st === 'earlyclose' || st.indexOf('early') >= 0) {
+            if (!early[h.date]) {
+              early[h.date] = {
+                name: h.name || '早收',
+                closeMins: closeMinsFromItem(h)
+              };
+            }
+          }
         });
-        return json({ ok: true, source: 'massive', holidays: map });
+        return json({ ok: true, source: 'massive', holidays: map, earlyClose: early });
       } catch (e) {
         return json({ ok: false, error: String(e) }, 502);
       }
