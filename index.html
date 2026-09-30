@@ -4274,6 +4274,21 @@ async function fetchQuote(symbol, opts) {
       if (mkt === 'cn') return (window.__mktHolidayCN && window.__mktHolidayCN[ymd]) || null;
       return (window.__mktHolidayUS && window.__mktHolidayUS[ymd]) || null;
     }
+    /** 美股当日收盘分钟数（美东）；联网日历早收日用接口时间，否则 16:00 */
+    function getUSCloseMinsForYmd(ymd) {
+      try {
+        ymd = ymd || (typeof mktYmdInTz === 'function' ? mktYmdInTz('America/New_York') : '');
+        var ec = window.__mktEarlyCloseUS && window.__mktEarlyCloseUS[ymd];
+        if (ec && typeof ec.closeMins === 'number' && ec.closeMins > 0) return ec.closeMins;
+      } catch (e) {}
+      return 16 * 60;
+    }
+    function getUSEarlyCloseInfo(ymd) {
+      try {
+        ymd = ymd || (typeof mktYmdInTz === 'function' ? mktYmdInTz('America/New_York') : '');
+        return (window.__mktEarlyCloseUS && window.__mktEarlyCloseUS[ymd]) || null;
+      } catch (e) { return null; }
+    }
     function mktIsWeekendYmd(ymd, tz) {
       try {
         var p = ymd.split('-').map(Number);
@@ -4398,13 +4413,32 @@ async function fetchQuote(symbol, opts) {
           if (h.days === 0) return ' · ' + label + '休市 · ' + name;
           return ' · ' + label + '休市 · ' + name + h.days + '天后';
         }
-        /** 收盘后是否仍在 1 小时「已收盘」提示有效期内 */
+        /** 收盘后「已收盘」提示窗口：美股/A股均约 1 小时 */
         function afterCloseWithin1h(mkt) {
           var tz = mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York';
           var nowM = minsInTz(tz);
           if (nowM < 0) return false;
-          var closeM = mkt === 'cn' ? (15 * 60) : (16 * 60);
-          return nowM >= closeM && nowM < closeM + 60;
+          var closeM = mkt === 'cn'
+            ? (15 * 60)
+            : ((typeof getUSCloseMinsForYmd === 'function') ? getUSCloseMinsForYmd() : (16 * 60));
+          var win = 60;
+          return nowM >= closeM && nowM < closeM + win;
+        }
+        function minsSinceClose(mkt) {
+          var tz = mkt === 'cn' ? 'Asia/Shanghai' : 'America/New_York';
+          var nowM = minsInTz(tz);
+          if (nowM < 0) return -1;
+          var closeM = mkt === 'cn'
+            ? (15 * 60)
+            : ((typeof getUSCloseMinsForYmd === 'function') ? getUSCloseMinsForYmd() : (16 * 60));
+          return Math.max(0, Math.floor(nowM - closeM));
+        }
+        function fmtClosedAgo(mins) {
+          mins = Math.max(0, Math.floor(Number(mins) || 0));
+          if (mins < 60) return mins + '分钟';
+          var h = Math.floor(mins / 60);
+          var m = mins % 60;
+          return m ? (h + '小时' + m + '分钟') : (h + '小时');
         }
         /**
          * 按交易日时间线选「当前该提示谁」：
@@ -4453,10 +4487,17 @@ async function fetchQuote(symbol, opts) {
 
         var act = pickActiveMarket();
         if (!act) return '';
-        // 盘中/开盘进度条负责时段；右侧仍可提示「近期下一个休市节日」
+        // 盘中：美股收盘前 30 分钟只提示「美股临近收盘」（早收日按当日收盘时间）
         if (act.open) {
-          var nearOpen = nearestHoliday();
-          if (nearOpen) return fmtHolidayHint(nearOpen);
+          try {
+            var tzOpen = 'America/New_York';
+            var nowOpen = minsInTz(tzOpen);
+            var closeOpen = (typeof getUSCloseMinsForYmd === 'function') ? getUSCloseMinsForYmd() : (16 * 60);
+            var usStillOpen = (typeof isUSMarketSessionOpen === 'function') && isUSMarketSessionOpen();
+            if (usStillOpen && nowOpen >= closeOpen - 30 && nowOpen < closeOpen) {
+              return ' · 美股临近收盘';
+            }
+          } catch (eNearOpen) {}
           return '';
         }
         var pick = act.pick;
@@ -4491,15 +4532,15 @@ async function fetchQuote(symbol, opts) {
           return ' · ' + label + '休市';
         }
         if (pick.kind === 'after') {
-          // 仅 1 小时有效
           if (!afterCloseWithin1h(mkt)) {
             var near2 = nearestHoliday();
             if (near2) return fmtHolidayHint(near2);
             return '';
           }
+          var ago = fmtClosedAgo(minsSinceClose(mkt));
           var d = daysToNextOpen(mkt, pick.ymd);
-          if (d > 0) return ' · ' + label + '已收盘 · 下开' + d + '天后';
-          return ' · ' + label + '已收盘';
+          if (d > 0) return ' · ' + label + '已收盘 ' + ago + ' · 下开' + d + '天后';
+          return ' · ' + label + '已收盘 ' + ago;
         }
         return '';
       } catch (e) { return ''; }
@@ -4554,6 +4595,19 @@ async function fetchQuote(symbol, opts) {
               window.__mktHolidayUS = usMap;
               window.__mktHolidayNetOk.us = true;
             }
+            // 美股早收日（非全天休市）
+            if (usJ && usJ.ok && usJ.earlyClose && typeof usJ.earlyClose === 'object') {
+              var ecMap = {};
+              Object.keys(usJ.earlyClose).forEach(function (dt) {
+                var raw = usJ.earlyClose[dt] || {};
+                var mins = (typeof raw.closeMins === 'number') ? raw.closeMins : (13 * 60);
+                if (mins < 10 * 60 || mins > 16 * 60) mins = 13 * 60;
+                var nm = raw.name || '早收';
+                if (typeof mktUsHolidayNameZh === 'function') nm = mktUsHolidayNameZh(nm) || nm;
+                ecMap[dt] = { name: nm, closeMins: mins };
+              });
+              window.__mktEarlyCloseUS = ecMap;
+            }
           }
         }
       } catch (e2) {
@@ -4582,12 +4636,14 @@ async function fetchQuote(symbol, opts) {
         parts.forEach(function (p) { map[p.type] = p.value; });
         const wd = (map.weekday || '').slice(0, 3);
         if (wd === 'Sat' || wd === 'Sun') return false;
-        if (typeof mktHolidayName === 'function' && mktHolidayName('us', mktYmdInTz('America/New_York'))) return false;
+        var ymdOpen = mktYmdInTz('America/New_York');
+        if (typeof mktHolidayName === 'function' && mktHolidayName('us', ymdOpen)) return false;
         let h = parseInt(map.hour, 10);
         if (h === 24) h = 0;
         const m = parseInt(map.minute, 10) || 0;
         const mins = h * 60 + m;
-        return mins >= 9 * 60 + 30 && mins < 16 * 60;
+        var closeM = (typeof getUSCloseMinsForYmd === 'function') ? getUSCloseMinsForYmd(ymdOpen) : (16 * 60);
+        return mins >= 9 * 60 + 30 && mins < closeM;
       } catch (e) {
         return false;
       }
@@ -4623,22 +4679,27 @@ async function fetchQuote(symbol, opts) {
         const se = parseInt(map.second, 10) || 0;
         const mins = h * 60 + mi + se / 60;
         const openM = 9 * 60 + 30;
-        const closeM = 16 * 60;
+        const closeM = (typeof getUSCloseMinsForYmd === 'function') ? getUSCloseMinsForYmd(ymdUS) : (16 * 60);
+        const earlyInfo = (typeof getUSEarlyCloseInfo === 'function') ? getUSEarlyCloseInfo(ymdUS) : null;
+        const isEarly = !!(earlyInfo && closeM < 16 * 60);
+        const total = Math.max(1, closeM - openM);
         if (mins < openM) {
-          return { open: false, elapsed01: 0, remain01: 1, minsLeft: closeM - openM, minsOpen: 0, pre: true };
+          return { open: false, elapsed01: 0, remain01: 1, minsLeft: total, minsOpen: 0, pre: true, earlyClose: isEarly, closeMins: closeM };
         }
         if (mins >= closeM) {
-          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: 390, after: true };
+          return { open: false, elapsed01: 1, remain01: 0, minsLeft: 0, minsOpen: total, after: true, earlyClose: isEarly, closeMins: closeM };
         }
         const elapsed = mins - openM;
-        const total = closeM - openM; // 390
         const left = closeM - mins;
         return {
           open: true,
           elapsed01: elapsed / total,
           remain01: left / total,
           minsLeft: left,
-          minsOpen: elapsed
+          minsOpen: elapsed,
+          earlyClose: isEarly,
+          closeMins: closeM,
+          earlyCloseName: earlyInfo ? earlyInfo.name : null
         };
       } catch (e) {
         return { open: false, elapsed01: 0.5, remain01: 0.5, minsLeft: 195, minsOpen: 195 };
@@ -6669,8 +6730,14 @@ async function fetchQuote(symbol, opts) {
       if (!wrap) return;
       const usOpen = (typeof isUSMarketSessionOpen === 'function') && isUSMarketSessionOpen();
       const cnOpen = (typeof isCNMarketSessionOpen === 'function') && isCNMarketSessionOpen();
+      // A股午休也显示进度条（11:30–13:00）
+      var cnLunch = false;
+      try {
+        var cnSess = (typeof getCNSessionProgress === 'function') ? getCNSessionProgress() : null;
+        cnLunch = !!(cnSess && cnSess.lunch);
+      } catch (eL) {}
 
-      if (!usOpen && !cnOpen) {
+      if (!usOpen && !cnOpen && !cnLunch) {
         wrap.style.display = 'none';
         return;
       }
@@ -6690,10 +6757,11 @@ async function fetchQuote(symbol, opts) {
         gap.style.display = 'none';
         fill.style.width = pct + '%';
         dot.style.left = pct + '%';
-        tag.textContent = '● 美股盘中';
+        tag.textContent = p.earlyClose ? '● 美股早收' : '● 美股盘中';
         remainEl.textContent = fmtMinsLeft(p.minsLeft);
         startEl.textContent = fmt12h(9, 30);
-        endEl.textContent = fmt12h(16, 0);
+        var cMins = (typeof p.closeMins === 'number') ? p.closeMins : (16 * 60);
+        endEl.textContent = fmt12h(Math.floor(cMins / 60), cMins % 60);
       } else {
         // A股：9:30–11:30 交易，11:30–13:00 午休（灰色间隔），13:00–15:00 交易
         const fmtCN = new Intl.DateTimeFormat('en-GB', {
@@ -6716,18 +6784,31 @@ async function fetchQuote(symbol, opts) {
         gap.style.left = amWidthPct + '%';
         gap.style.width = gapWidthPct + '%';
 
-        let elapsedSpan, minsLeft;
+        let elapsedSpan, minsLeft, isLunch = (mins >= amClose && mins < pmOpen);
         if (mins < amClose) {
+          // 上午盘中
           elapsedSpan = mins - amOpen;
           minsLeft = (amClose - mins) + (pmClose - pmOpen);
+        } else if (isLunch) {
+          // 午休：进度停在上午收盘位置，剩余=距下午开盘 + 下午全段
+          elapsedSpan = amClose - amOpen;
+          minsLeft = (pmOpen - mins) + (pmClose - pmOpen);
         } else {
+          // 下午盘中
           elapsedSpan = (amClose - amOpen) + (mins - pmOpen);
           minsLeft = pmClose - mins;
         }
-        const pct = Math.max(0, Math.min(1, elapsedSpan / totalSpan)) * 100;
-        fill.style.width = pct + '%';
+        // 进度条按「含午休的全日时间轴」定位，午休时圆点落在灰色间隔起点
+        var pct;
+        if (isLunch) {
+          var lunchPct = (mins - amOpen) / totalSpan * 100;
+          pct = Math.max(amWidthPct, Math.min(amWidthPct + gapWidthPct, lunchPct));
+        } else {
+          pct = Math.max(0, Math.min(1, elapsedSpan / totalSpan)) * 100;
+        }
+        fill.style.width = (isLunch ? amWidthPct : pct) + '%';
         dot.style.left = pct + '%';
-        tag.textContent = '● A股盘中';
+        tag.textContent = isLunch ? '● A股午休' : '● A股盘中';
         remainEl.textContent = fmtMinsLeft(minsLeft);
         startEl.textContent = fmt12h(9, 30);
         endEl.textContent = fmt12h(15, 0);
@@ -10744,95 +10825,123 @@ const FUND_FLOW_B64 = [
 "dyhPYmplY3Qua2V5cyhtYXApLm1hcChmdW5jdGlvbiAoaykgeyByZXR1cm4gbWFwW2tdOyB9KSk7",
 "CiAgdHJ5IHsgbG9jYWxTdG9yYWdlLnNldEl0ZW0oJ2Z1bmRmbG93X2NuX2xpdmUnLCBKU09OLnN0",
 "cmluZ2lmeSh7IGF0OiBEYXRlLm5vdygpLCBmbG93OiBmbG93IH0pKTsgfSBjYXRjaCAoZSkge30K",
-"ICByZXR1cm4gZmxvdzsKfQoKYXN5bmMgZnVuY3Rpb24gZmV0Y2hVc0Z1bmRGbG93KCkgewogIGNv",
-"bnN0IHJvd3MgPSBhd2FpdCBmZXRjaEJremooJ206MTA1LG06MTA2LG06MTA3JywgJ2Y2MicpOwog",
-"IGlmICghcm93cyB8fCAhcm93cy5sZW5ndGgpIHJldHVybiBudWxsOwogIGNvbnN0IG1hcHBlZCA9",
-"IFtdOwogIGNvbnN0IHVzZWQgPSB7fTsKICByb3dzLmZvckVhY2goZnVuY3Rpb24gKHIpIHsKICAg",
-"IGNvbnN0IHN5bSA9IFN0cmluZyhyLmYxMiB8fCAnJykudHJpbSgpLnRvVXBwZXJDYXNlKCk7CiAg",
-"ICBjb25zdCByYXdOYW1lID0gU3RyaW5nKHIuZjE0IHx8ICcnKS50cmltKCk7CiAgICBjb25zdCB2",
-"ID0gTnVtYmVyKHIuZjYyKTsKICAgIGlmICghaXNGaW5pdGUodikgfHwgIXYpIHJldHVybjsKICAg",
-"IGlmIChVU19TRUNUT1JfRVRGW3N5bV0pIHsKICAgICAgbWFwcGVkLnB1c2goeyBmMTQ6IFVTX1NF",
-"Q1RPUl9FVEZbc3ltXSwgZjYyOiB2IH0pOwogICAgICB1c2VkW1VTX1NFQ1RPUl9FVEZbc3ltXV0g",
-"PSB0cnVlOwogICAgfQogIH0pOwogIC8vIOadv+WdlyBFVEYg5aSq5bCR5pe277yM55So5bim6KGM",
-"5Lia6K+t5LmJ55qEIEVURi/kuKrogqHlkI3np7DooaXpvZDvvIjku43mmK/nnJ/lrp4gZjYy77yJ",
-"CiAgaWYgKG1hcHBlZC5sZW5ndGggPCA4KSB7CiAgICByb3dzLmZvckVhY2goZnVuY3Rpb24gKHIp",
-"IHsKICAgICAgY29uc3QgbmFtZSA9IFN0cmluZyhyLmYxNCB8fCAnJykudHJpbSgpOwogICAgICBj",
-"b25zdCB2ID0gTnVtYmVyKHIuZjYyKTsKICAgICAgaWYgKCFpc0Zpbml0ZSh2KSB8fCAhdiB8fCAh",
-"bmFtZSkgcmV0dXJuOwogICAgICBpZiAobWFwcGVkLmxlbmd0aCA+PSAyNCkgcmV0dXJuOwogICAg",
-"ICBjb25zdCBpc0V0ZiA9IC9FVEZ85oyH5pWwfOadv+Wdl3zooYzkuJovaS50ZXN0KG5hbWUpOwog",
-"ICAgICBpZiAoIWlzRXRmICYmIG1hcHBlZC5sZW5ndGggPj0gMTIpIHJldHVybjsKICAgICAgaWYg",
-"KHVzZWRbbmFtZV0pIHJldHVybjsKICAgICAgdXNlZFtuYW1lXSA9IHRydWU7CiAgICAgIG1hcHBl",
-"ZC5wdXNoKHsgZjE0OiBuYW1lLCBmNjI6IHYgfSk7CiAgICB9KTsKICB9CiAgaWYgKCFtYXBwZWQu",
-"bGVuZ3RoKSByZXR1cm4gbnVsbDsKICBjb25zdCBmbG93ID0gcm93c1RvRmxvdyhtYXBwZWQpOwog",
-"IGZsb3cuX19hcHByb3ggPSBmYWxzZTsKICB0cnkgeyBsb2NhbFN0b3JhZ2Uuc2V0SXRlbSgnZnVu",
-"ZGZsb3dfdXNfbGl2ZScsIEpTT04uc3RyaW5naWZ5KHsgYXQ6IERhdGUubm93KCksIGZsb3c6IGZs",
-"b3cgfSkpOyB9IGNhdGNoIChlKSB7fQogIHJldHVybiBmbG93Owp9Cgphc3luYyBmdW5jdGlvbiBm",
-"ZXRjaEhpc3RGdW5kRmxvdyhtYXJrZXQsIGRhdGVTdHIpIHsKICAvLyA15pelIC8gMTDml6XntK/o",
-"rqHmmK/kuJzotKLlhazlvIDnmoTkuKTmoaPljoblj7Llj6PlvoTvvIzkuI3mmK/ku7vmhI/ml6Xl",
-"jobml6UKICAvLyDku7vmhI/ljoblj7Lml6XvvJrnm67liY3kuJzotKLml6VL6LWE6YeR57q/5Zyo",
-"IFdvcmtlciBJUCDkuIrnu4/luLjlpLHotKXvvIzlhYjor7vmnKzlnLDlvZPlpKnnvJPlrZgKICB0",
-"cnkgewogICAgY29uc3QgcmF3ID0gbG9jYWxTdG9yYWdlLmdldEl0ZW0oJ2Z1bmRmbG93XycgKyBt",
-"YXJrZXQgKyAnX2xpdmUnKTsKICAgIGlmIChyYXcpIHsKICAgICAgY29uc3Qgb2JqID0gSlNPTi5w",
-"YXJzZShyYXcpOwogICAgICBpZiAob2JqICYmIG9iai5mbG93ICYmIG9iai5hdCkgewogICAgICAg",
-"IGNvbnN0IGQgPSBuZXcgRGF0ZShvYmouYXQpOwogICAgICAgIGNvbnN0IGRzID0gZC5nZXRGdWxs",
-"WWVhcigpICsgJy0nICsgU3RyaW5nKGQuZ2V0TW9udGgoKSsxKS5wYWRTdGFydCgyLCcwJykgKyAn",
-"LScgKyBTdHJpbmcoZC5nZXREYXRlKCkpLnBhZFN0YXJ0KDIsJzAnKTsKICAgICAgICBpZiAoZHMg",
-"PT09IGRhdGVTdHIpIHsKICAgICAgICAgIGNvbnN0IGZsb3cgPSBvYmouZmxvdzsKICAgICAgICAg",
-"IGZsb3cuX19kYXRlU3RyID0gZGF0ZVN0cjsKICAgICAgICAgIGZsb3cuX19saXZlID0gZmFsc2U7",
-"CiAgICAgICAgICBmbG93Ll9fZW1wdHkgPSBmYWxzZTsKICAgICAgICAgIHJldHVybiBmbG93Owog",
-"ICAgICAgIH0KICAgICAgfQogICAgfQogIH0gY2F0Y2ggKGUpIHt9CiAgY29uc3Qga2V5ID0gJ2Yx",
-"NjQnOyAvLyA15pel57Sv6K6h77yM5LuF5b2T55So5oi36YCJ44CM6L+R5Yeg5pel44CN5pe25L2c",
-"5Y+C6ICD77yb5Lu75oSP5pel5pyf5LuN5Y+v6IO95peg5Y2V5pel5YiH54mHCiAgcmV0dXJuIG51",
-"bGw7Cn0KCmFzeW5jIGZ1bmN0aW9uIHJlZnJlc2hMaXZlRnVuZEZsb3coZm9yY2VCb3RoKSB7CiAg",
-"Y29uc3QgbWFya2V0cyA9IGZvcmNlQm90aCA/IFsndXMnLCAnY24nXSA6IFtjdXJyZW50TWFya2V0",
-"XTsKICAvLyDlkIzml7bmiorlj6bkuIDluILlnLrkuZ/mgoTmgoTmi4nkuIDmrKHvvIzliIfmjaLm",
-"l7bmm7TpoboKICBpZiAoIWZvcmNlQm90aCkgewogICAgY29uc3Qgb3RoZXIgPSBjdXJyZW50TWFy",
-"a2V0ID09PSAndXMnID8gJ2NuJyA6ICd1cyc7CiAgICBpZiAoIWZ1bmRGbG93TG9hZGVkT25jZVtv",
-"dGhlcl0pIG1hcmtldHMucHVzaChvdGhlcik7CiAgfQogIGZvciAoY29uc3QgbSBvZiBtYXJrZXRz",
-"KSB7CiAgICBmdW5kRmxvd0xvYWRpbmdbbV0gPSB0cnVlOwogIH0KICB0cnkgeyB1cGRhdGVFbXB0",
-"eVN0YXRlKCk7IH0gY2F0Y2ggKGUpIHt9CiAgYXN5bmMgZnVuY3Rpb24gbG9hZE9uZShtKSB7CiAg",
-"ICB0cnkgewogICAgICBjb25zdCBmbG93ID0gbSA9PT0gJ2NuJyA/IGF3YWl0IGZldGNoQ25GdW5k",
-"RmxvdygpIDogYXdhaXQgZmV0Y2hVc0Z1bmRGbG93KCk7CiAgICAgIGlmIChmbG93ICYmICgoZmxv",
-"dy5pbmZsb3cgfHwgW10pLmZpbHRlcihmdW5jdGlvbihkKXsgcmV0dXJuIGQubmFtZSAhPT0gJ+W4",
-"guWcuuemu+Wcuic7IH0pLmxlbmd0aCA+IDAgfHwgKGZsb3cub3V0ZmxvdyB8fCBbXSkubGVuZ3Ro",
-"ID4gMCkpIHsKICAgICAgICBmbG93Ll9fZW1wdHkgPSBmYWxzZTsKICAgICAgICBmbG93Ll9fbGl2",
-"ZSA9IHRydWU7CiAgICAgICAgZmxvdy5fX2RhdGVTdHIgPSBudWxsOwogICAgICAgIERBVEFTRVRT",
-"W21dLnRvZGF5ID0gZmxvdzsKICAgICAgfSBlbHNlIHsKICAgICAgICAvLyDmsqHmnInnnJ/lrp7m",
-"lbDmja7vvJrkv53mjIHnqbrmgIHvvIzkuI3lm57loavlgYfmlbDmja4KICAgICAgICBpZiAoIURB",
-"VEFTRVRTW21dLnRvZGF5IHx8IERBVEFTRVRTW21dLnRvZGF5Ll9fZW1wdHkgfHwgaXNGbG93RW1w",
-"dHkoREFUQVNFVFNbbV0udG9kYXkpKSB7CiAgICAgICAgICBEQVRBU0VUU1ttXS50b2RheSA9IE9i",
-"amVjdC5hc3NpZ24oe30sIEVNUFRZX0ZMT1csIHsgaW5mbG93OiBbe25hbWU6J+W4guWcuuemu+Wc",
-"uicsIHY6MH1dLCBfX2VtcHR5OiB0cnVlLCBfX2xpdmU6IGZhbHNlIH0pOwogICAgICAgIH0KICAg",
-"ICAgfQogICAgfSBjYXRjaCAoZSkgewogICAgICBjb25zb2xlLndhcm4obSArICcgZnVuZCBmbG93",
-"JywgZSk7CiAgICAgIGlmICghZnVuZEZsb3dMb2FkZWRPbmNlW21dKSB7CiAgICAgICAgREFUQVNF",
-"VFNbbV0udG9kYXkgPSBPYmplY3QuYXNzaWduKHt9LCBFTVBUWV9GTE9XLCB7IGluZmxvdzogW3tu",
-"YW1lOifluILlnLrnprvlnLonLCB2OjB9XSwgX19lbXB0eTogdHJ1ZSwgX19saXZlOiBmYWxzZSB9",
-"KTsKICAgICAgfQogICAgfSBmaW5hbGx5IHsKICAgICAgZnVuZEZsb3dMb2FkaW5nW21dID0gZmFs",
-"c2U7CiAgICAgIGZ1bmRGbG93TG9hZGVkT25jZVttXSA9IHRydWU7CiAgICB9CiAgfQogIGF3YWl0",
-"IFByb21pc2UuYWxsKG1hcmtldHMubWFwKGxvYWRPbmUpKTsKICB0cnkgewogICAgaWYgKHR5cGVv",
-"ZiByZWJ1aWxkTWFpblZpZXcgPT09ICdmdW5jdGlvbicpIHJlYnVpbGRNYWluVmlldygpOwogICAg",
-"aWYgKHR5cGVvZiByZW5kZXJTaGVldHMgPT09ICdmdW5jdGlvbicpIHJlbmRlclNoZWV0cygpOwog",
-"ICAgaWYgKHR5cGVvZiB1cGRhdGVIZWFkZXIgPT09ICdmdW5jdGlvbicpIHVwZGF0ZUhlYWRlcigp",
-"OwogIH0gY2F0Y2ggKGUpIHt9Cn0KCi8qID09PT09PT09PT09PT09PT09PT09PSDliJ3lp4vljJYg",
-"PT09PT09PT09PT09PT09PT09PT09ICovCihmdW5jdGlvbiBpbml0RGF5UGlja2VyKCl7CiAgY29u",
-"c3QgcGlja2VyID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ2RheVBpY2tlcicpOwogIHBpY2tl",
-"ci5tYXggPSB0b0RhdGVTdHIodG9kYXlNaWRuaWdodCgpKTsKICBwaWNrZXIubWluID0gdG9EYXRl",
-"U3RyKG1pbkFsbG93ZWREYXRlKCkpOwp9KSgpOwpmdW5jdGlvbiBnb0JhY2tUb1BhcmVudCgpewog",
-"IHRyeSB7CiAgICBpZiAod2luZG93LnBhcmVudCAmJiB3aW5kb3cucGFyZW50ICE9PSB3aW5kb3cp",
-"IHsKICAgICAgd2luZG93LnBhcmVudC5wb3N0TWVzc2FnZSh7IHR5cGU6ICd2YWxNb2R1bGVCYWNr",
-"JyB9LCAnKicpOwogICAgICByZXR1cm47CiAgICB9CiAgfSBjYXRjaCAoZSkge30KICB0cnkgeyBo",
-"aXN0b3J5LmJhY2soKTsgfSBjYXRjaCAoZTIpIHt9Cn0KbG9hZENuSG9saWRheXMoKTsKbG9hZFVz",
-"SG9saWRheXMoKTsKdXBkYXRlSGVhZGVyKCk7CmZ1bmRGbG93TG9hZGluZy51cyA9IHRydWU7CmZ1",
-"bmRGbG93TG9hZGluZy5jbiA9IHRydWU7CnJlYnVpbGRNYWluVmlldygpOwpyZW5kZXJTaGVldHMo",
-"KTsKcmVmcmVzaExpdmVGdW5kRmxvdyh0cnVlKTsKc2V0SW50ZXJ2YWwodXBkYXRlSGVhZGVyLCAz",
-"MDAwMCk7CnNldEludGVydmFsKGZ1bmN0aW9uICgpIHsKICB0cnkgewogICAgdmFyIGRzID0gZWZm",
-"ZWN0aXZlRFMoKTsKICAgIGlmIChkcyAmJiBkcy5fX2xpdmUgJiYgY3VycmVudFZpZXdEYXRlID09",
-"PSBudWxsKSByZXR1cm47CiAgICBqaXR0ZXJGbG93UmFua2luZygpOwogIH0gY2F0Y2ggKGUpIHsg",
-"aml0dGVyRmxvd1JhbmtpbmcoKTsgfQp9LCAxODAwKTsKc2V0SW50ZXJ2YWwoZnVuY3Rpb24gKCkg",
-"ewogIHRyeSB7CiAgICBpZiAoY3VycmVudFZpZXdEYXRlID09PSBudWxsKSByZWZyZXNoTGl2ZUZ1",
-"bmRGbG93KCk7CiAgfSBjYXRjaCAoZSkge30KfSwgMTIwMDAwKTsKd2luZG93LmFkZEV2ZW50TGlz",
-"dGVuZXIoJ3Jlc2l6ZScsIHJlYnVpbGRNYWluVmlldyk7Cjwvc2NyaXB0PgoKPC9ib2R5Pgo8L2h0",
-"bWw+Cg=="
+"ICByZXR1cm4gZmxvdzsKfQoKYXN5bmMgZnVuY3Rpb24gZmV0Y2hVc1NlY3RvckV0ZkZsb3dzKCkg",
+"ewogIC8vIOihjOS4miBFVEYg6YCQ5om55ouJ5Li75Yqb5YeA5rWB5YWl77ya5Y+v5ZCM5pe25ou/",
+"5Yiw5rWB5YWlL+a1geWHuu+8iGdldGJremog576O6IKh5qac5Y+q6L+U5Zue5YeA5rWB5YWlIFRv",
+"cO+8iQogIGNvbnN0IHN5bXMgPSBPYmplY3Qua2V5cyhVU19TRUNUT1JfRVRGKTsKICBjb25zdCBz",
+"ZWNpZHMgPSBzeW1zLm1hcChmdW5jdGlvbiAocykgeyByZXR1cm4gJzEwNS4nICsgczsgfSk7CiAg",
+"Y29uc3QgaG9zdHMgPSBbCiAgICAnODIucHVzaDIuZWFzdG1vbmV5LmNvbScsCiAgICAnNzkucHVz",
+"aDIuZWFzdG1vbmV5LmNvbScsCiAgICAncHVzaDJkZWxheS5lYXN0bW9uZXkuY29tJywKICAgICdw",
+"dXNoMi5lYXN0bW9uZXkuY29tJwogIF07CiAgY29uc3QgYnlTeW0gPSB7fTsKICBjb25zdCBiYXRj",
+"aFNpemUgPSAxMjsKICBmb3IgKGxldCBoaSA9IDA7IGhpIDwgaG9zdHMubGVuZ3RoOyBoaSsrKSB7",
+"CiAgICBjb25zdCBob3N0ID0gaG9zdHNbaGldOwogICAgbGV0IGdvdEFueSA9IGZhbHNlOwogICAg",
+"Zm9yIChsZXQgaSA9IDA7IGkgPCBzZWNpZHMubGVuZ3RoOyBpICs9IGJhdGNoU2l6ZSkgewogICAg",
+"ICBjb25zdCBiYXRjaCA9IHNlY2lkcy5zbGljZShpLCBpICsgYmF0Y2hTaXplKTsKICAgICAgY29u",
+"c3QgdXJsID0gJ2h0dHBzOi8vJyArIGhvc3QgKyAnL2FwaS9xdC91bGlzdC5ucC9nZXQ/Zmx0dD0y",
+"JnNlY2lkcz0nICsgYmF0Y2guam9pbignLCcpICsKICAgICAgICAnJmZpZWxkcz1mMTIsZjE0LGYy",
+"LGYzLGY2MixmMTg0Jl89JyArIERhdGUubm93KCk7CiAgICAgIHRyeSB7CiAgICAgICAgY29uc3Qg",
+"ZGF0YSA9IGF3YWl0IGZldGNoSnNvblZpYVByb3h5KHVybCk7CiAgICAgICAgbGV0IGRpZmYgPSBw",
+"aWNrRGlmZihkYXRhKTsKICAgICAgICBpZiAoIWRpZmYubGVuZ3RoICYmIGRhdGEgJiYgZGF0YS5k",
+"YXRhICYmIGRhdGEuZGF0YS5kaWZmKSB7CiAgICAgICAgICBjb25zdCBkID0gZGF0YS5kYXRhLmRp",
+"ZmY7CiAgICAgICAgICBkaWZmID0gQXJyYXkuaXNBcnJheShkKSA/IGQgOiBPYmplY3Qua2V5cyhk",
+"KS5tYXAoZnVuY3Rpb24gKGspIHsgcmV0dXJuIGRba107IH0pOwogICAgICAgIH0KICAgICAgICBk",
+"aWZmLmZvckVhY2goZnVuY3Rpb24gKHIpIHsKICAgICAgICAgIGNvbnN0IHN5bSA9IFN0cmluZyhy",
+"LmYxMiB8fCAnJykudHJpbSgpLnRvVXBwZXJDYXNlKCk7CiAgICAgICAgICBpZiAoIVVTX1NFQ1RP",
+"Ul9FVEZbc3ltXSkgcmV0dXJuOwogICAgICAgICAgY29uc3QgdiA9IE51bWJlcihyLmY2Mik7CiAg",
+"ICAgICAgICBpZiAoIWlzRmluaXRlKHYpKSByZXR1cm47CiAgICAgICAgICBieVN5bVtzeW1dID0g",
+"eyBmMTQ6IFVTX1NFQ1RPUl9FVEZbc3ltXSwgZjYyOiB2IH07CiAgICAgICAgICBnb3RBbnkgPSB0",
+"cnVlOwogICAgICAgIH0pOwogICAgICB9IGNhdGNoIChlKSB7fQogICAgfQogICAgaWYgKE9iamVj",
+"dC5rZXlzKGJ5U3ltKS5sZW5ndGggPj0gMTApIGJyZWFrOwogICAgaWYgKGdvdEFueSAmJiBPYmpl",
+"Y3Qua2V5cyhieVN5bSkubGVuZ3RoID49IDYpIGJyZWFrOwogIH0KICByZXR1cm4gT2JqZWN0Lmtl",
+"eXMoYnlTeW0pLm1hcChmdW5jdGlvbiAoaykgeyByZXR1cm4gYnlTeW1ba107IH0pOwp9Cgphc3lu",
+"YyBmdW5jdGlvbiBmZXRjaFVzRnVuZEZsb3coKSB7CiAgLy8gMSkg6KGM5LiaIEVURu+8iOWujOaV",
+"tOS6p+S4miArIOa2qOi3jOWPjOWQke+8iQogIGxldCBtYXBwZWQgPSBhd2FpdCBmZXRjaFVzU2Vj",
+"dG9yRXRmRmxvd3MoKTsKICBjb25zdCB1c2VkTmFtZSA9IHt9OwogIChtYXBwZWQgfHwgW10pLmZv",
+"ckVhY2goZnVuY3Rpb24gKHIpIHsgaWYgKHIgJiYgci5mMTQpIHVzZWROYW1lW3IuZjE0XSA9IHRy",
+"dWU7IH0pOwoKICAvLyAyKSBnZXRia3pqIOe+juiCoeamnOihpea8j++8muaKiuacquimhuebluea",
+"hOihjOS4miBFVEYgLyDor63kuYkgRVRGIOW5tuWFpQogIHRyeSB7CiAgICBjb25zdCByb3dzID0g",
+"YXdhaXQgZmV0Y2hCa3pqKCdtOjEwNSxtOjEwNixtOjEwNycsICdmNjInKTsKICAgIChyb3dzIHx8",
+"IFtdKS5mb3JFYWNoKGZ1bmN0aW9uIChyKSB7CiAgICAgIGNvbnN0IHN5bSA9IFN0cmluZyhyLmYx",
+"MiB8fCAnJykudHJpbSgpLnRvVXBwZXJDYXNlKCk7CiAgICAgIGNvbnN0IHYgPSBOdW1iZXIoci5m",
+"NjIpOwogICAgICBpZiAoIWlzRmluaXRlKHYpIHx8ICF2KSByZXR1cm47CiAgICAgIGlmIChVU19T",
+"RUNUT1JfRVRGW3N5bV0pIHsKICAgICAgICBjb25zdCBuYW1lID0gVVNfU0VDVE9SX0VURltzeW1d",
+"OwogICAgICAgIGlmICghdXNlZE5hbWVbbmFtZV0pIHsKICAgICAgICAgIG1hcHBlZC5wdXNoKHsg",
+"ZjE0OiBuYW1lLCBmNjI6IHYgfSk7CiAgICAgICAgICB1c2VkTmFtZVtuYW1lXSA9IHRydWU7CiAg",
+"ICAgICAgfQogICAgICB9CiAgICB9KTsKICB9IGNhdGNoIChlKSB7fQoKICBpZiAoIW1hcHBlZCB8",
+"fCAhbWFwcGVkLmxlbmd0aCkgcmV0dXJuIG51bGw7CiAgLy8g5ZCM5ZCN6KGM5Lia5ZCI5bm25YeA",
+"6aKdCiAgY29uc3QgbWVyZ2UgPSB7fTsKICBtYXBwZWQuZm9yRWFjaChmdW5jdGlvbiAocikgewog",
+"ICAgY29uc3QgbiA9IHIuZjE0OwogICAgaWYgKCFtZXJnZVtuXSkgbWVyZ2Vbbl0gPSAwOwogICAg",
+"bWVyZ2Vbbl0gKz0gTnVtYmVyKHIuZjYyKSB8fCAwOwogIH0pOwogIG1hcHBlZCA9IE9iamVjdC5r",
+"ZXlzKG1lcmdlKS5tYXAoZnVuY3Rpb24gKG4pIHsgcmV0dXJuIHsgZjE0OiBuLCBmNjI6IG1lcmdl",
+"W25dIH07IH0pOwogIGNvbnN0IGZsb3cgPSByb3dzVG9GbG93KG1hcHBlZCk7CiAgZmxvdy5fX2Fw",
+"cHJveCA9IGZhbHNlOwogIHRyeSB7IGxvY2FsU3RvcmFnZS5zZXRJdGVtKCdmdW5kZmxvd191c19s",
+"aXZlJywgSlNPTi5zdHJpbmdpZnkoeyBhdDogRGF0ZS5ub3coKSwgZmxvdzogZmxvdyB9KSk7IH0g",
+"Y2F0Y2ggKGUpIHt9CiAgcmV0dXJuIGZsb3c7Cn0KCmFzeW5jIGZ1bmN0aW9uIGZldGNoSGlzdEZ1",
+"bmRGbG93KG1hcmtldCwgZGF0ZVN0cikgewogIC8vIDXml6UgLyAxMOaXpee0r+iuoeaYr+S4nOi0",
+"ouWFrOW8gOeahOS4pOaho+WOhuWPsuWPo+W+hO+8jOS4jeaYr+S7u+aEj+aXpeWOhuaXpQogIC8v",
+"IOS7u+aEj+WOhuWPsuaXpe+8muebruWJjeS4nOi0ouaXpUvotYTph5Hnur/lnKggV29ya2VyIElQ",
+"IOS4iue7j+W4uOWksei0pe+8jOWFiOivu+acrOWcsOW9k+Wkqee8k+WtmAogIHRyeSB7CiAgICBj",
+"b25zdCByYXcgPSBsb2NhbFN0b3JhZ2UuZ2V0SXRlbSgnZnVuZGZsb3dfJyArIG1hcmtldCArICdf",
+"bGl2ZScpOwogICAgaWYgKHJhdykgewogICAgICBjb25zdCBvYmogPSBKU09OLnBhcnNlKHJhdyk7",
+"CiAgICAgIGlmIChvYmogJiYgb2JqLmZsb3cgJiYgb2JqLmF0KSB7CiAgICAgICAgY29uc3QgZCA9",
+"IG5ldyBEYXRlKG9iai5hdCk7CiAgICAgICAgY29uc3QgZHMgPSBkLmdldEZ1bGxZZWFyKCkgKyAn",
+"LScgKyBTdHJpbmcoZC5nZXRNb250aCgpKzEpLnBhZFN0YXJ0KDIsJzAnKSArICctJyArIFN0cmlu",
+"ZyhkLmdldERhdGUoKSkucGFkU3RhcnQoMiwnMCcpOwogICAgICAgIGlmIChkcyA9PT0gZGF0ZVN0",
+"cikgewogICAgICAgICAgY29uc3QgZmxvdyA9IG9iai5mbG93OwogICAgICAgICAgZmxvdy5fX2Rh",
+"dGVTdHIgPSBkYXRlU3RyOwogICAgICAgICAgZmxvdy5fX2xpdmUgPSBmYWxzZTsKICAgICAgICAg",
+"IGZsb3cuX19lbXB0eSA9IGZhbHNlOwogICAgICAgICAgcmV0dXJuIGZsb3c7CiAgICAgICAgfQog",
+"ICAgICB9CiAgICB9CiAgfSBjYXRjaCAoZSkge30KICBjb25zdCBrZXkgPSAnZjE2NCc7IC8vIDXm",
+"l6XntK/orqHvvIzku4XlvZPnlKjmiLfpgInjgIzov5Hlh6Dml6XjgI3ml7bkvZzlj4LogIPvvJvk",
+"u7vmhI/ml6XmnJ/ku43lj6/og73ml6DljZXml6XliIfniYcKICByZXR1cm4gbnVsbDsKfQoKYXN5",
+"bmMgZnVuY3Rpb24gcmVmcmVzaExpdmVGdW5kRmxvdyhmb3JjZUJvdGgpIHsKICBjb25zdCBtYXJr",
+"ZXRzID0gZm9yY2VCb3RoID8gWyd1cycsICdjbiddIDogW2N1cnJlbnRNYXJrZXRdOwogIC8vIOWQ",
+"jOaXtuaKiuWPpuS4gOW4guWcuuS5n+aChOaChOaLieS4gOasoe+8jOWIh+aNouaXtuabtOmhugog",
+"IGlmICghZm9yY2VCb3RoKSB7CiAgICBjb25zdCBvdGhlciA9IGN1cnJlbnRNYXJrZXQgPT09ICd1",
+"cycgPyAnY24nIDogJ3VzJzsKICAgIGlmICghZnVuZEZsb3dMb2FkZWRPbmNlW290aGVyXSkgbWFy",
+"a2V0cy5wdXNoKG90aGVyKTsKICB9CiAgZm9yIChjb25zdCBtIG9mIG1hcmtldHMpIHsKICAgIGZ1",
+"bmRGbG93TG9hZGluZ1ttXSA9IHRydWU7CiAgfQogIHRyeSB7IHVwZGF0ZUVtcHR5U3RhdGUoKTsg",
+"fSBjYXRjaCAoZSkge30KICBhc3luYyBmdW5jdGlvbiBsb2FkT25lKG0pIHsKICAgIHRyeSB7CiAg",
+"ICAgIGNvbnN0IGZsb3cgPSBtID09PSAnY24nID8gYXdhaXQgZmV0Y2hDbkZ1bmRGbG93KCkgOiBh",
+"d2FpdCBmZXRjaFVzRnVuZEZsb3coKTsKICAgICAgaWYgKGZsb3cgJiYgKChmbG93LmluZmxvdyB8",
+"fCBbXSkuZmlsdGVyKGZ1bmN0aW9uKGQpeyByZXR1cm4gZC5uYW1lICE9PSAn5biC5Zy656a75Zy6",
+"JzsgfSkubGVuZ3RoID4gMCB8fCAoZmxvdy5vdXRmbG93IHx8IFtdKS5sZW5ndGggPiAwKSkgewog",
+"ICAgICAgIGZsb3cuX19lbXB0eSA9IGZhbHNlOwogICAgICAgIGZsb3cuX19saXZlID0gdHJ1ZTsK",
+"ICAgICAgICBmbG93Ll9fZGF0ZVN0ciA9IG51bGw7CiAgICAgICAgREFUQVNFVFNbbV0udG9kYXkg",
+"PSBmbG93OwogICAgICB9IGVsc2UgewogICAgICAgIC8vIOayoeacieecn+WunuaVsOaNru+8muS/",
+"neaMgeepuuaAge+8jOS4jeWbnuWhq+WBh+aVsOaNrgogICAgICAgIGlmICghREFUQVNFVFNbbV0u",
+"dG9kYXkgfHwgREFUQVNFVFNbbV0udG9kYXkuX19lbXB0eSB8fCBpc0Zsb3dFbXB0eShEQVRBU0VU",
+"U1ttXS50b2RheSkpIHsKICAgICAgICAgIERBVEFTRVRTW21dLnRvZGF5ID0gT2JqZWN0LmFzc2ln",
+"bih7fSwgRU1QVFlfRkxPVywgeyBpbmZsb3c6IFt7bmFtZTon5biC5Zy656a75Zy6JywgdjowfV0s",
+"IF9fZW1wdHk6IHRydWUsIF9fbGl2ZTogZmFsc2UgfSk7CiAgICAgICAgfQogICAgICB9CiAgICB9",
+"IGNhdGNoIChlKSB7CiAgICAgIGNvbnNvbGUud2FybihtICsgJyBmdW5kIGZsb3cnLCBlKTsKICAg",
+"ICAgaWYgKCFmdW5kRmxvd0xvYWRlZE9uY2VbbV0pIHsKICAgICAgICBEQVRBU0VUU1ttXS50b2Rh",
+"eSA9IE9iamVjdC5hc3NpZ24oe30sIEVNUFRZX0ZMT1csIHsgaW5mbG93OiBbe25hbWU6J+W4guWc",
+"uuemu+WcuicsIHY6MH1dLCBfX2VtcHR5OiB0cnVlLCBfX2xpdmU6IGZhbHNlIH0pOwogICAgICB9",
+"CiAgICB9IGZpbmFsbHkgewogICAgICBmdW5kRmxvd0xvYWRpbmdbbV0gPSBmYWxzZTsKICAgICAg",
+"ZnVuZEZsb3dMb2FkZWRPbmNlW21dID0gdHJ1ZTsKICAgIH0KICB9CiAgYXdhaXQgUHJvbWlzZS5h",
+"bGwobWFya2V0cy5tYXAobG9hZE9uZSkpOwogIHRyeSB7CiAgICBpZiAodHlwZW9mIHJlYnVpbGRN",
+"YWluVmlldyA9PT0gJ2Z1bmN0aW9uJykgcmVidWlsZE1haW5WaWV3KCk7CiAgICBpZiAodHlwZW9m",
+"IHJlbmRlclNoZWV0cyA9PT0gJ2Z1bmN0aW9uJykgcmVuZGVyU2hlZXRzKCk7CiAgICBpZiAodHlw",
+"ZW9mIHVwZGF0ZUhlYWRlciA9PT0gJ2Z1bmN0aW9uJykgdXBkYXRlSGVhZGVyKCk7CiAgfSBjYXRj",
+"aCAoZSkge30KfQoKLyogPT09PT09PT09PT09PT09PT09PT09IOWIneWni+WMliA9PT09PT09PT09",
+"PT09PT09PT09PT0gKi8KKGZ1bmN0aW9uIGluaXREYXlQaWNrZXIoKXsKICBjb25zdCBwaWNrZXIg",
+"PSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnZGF5UGlja2VyJyk7CiAgcGlja2VyLm1heCA9IHRv",
+"RGF0ZVN0cih0b2RheU1pZG5pZ2h0KCkpOwogIHBpY2tlci5taW4gPSB0b0RhdGVTdHIobWluQWxs",
+"b3dlZERhdGUoKSk7Cn0pKCk7CmZ1bmN0aW9uIGdvQmFja1RvUGFyZW50KCl7CiAgdHJ5IHsKICAg",
+"IGlmICh3aW5kb3cucGFyZW50ICYmIHdpbmRvdy5wYXJlbnQgIT09IHdpbmRvdykgewogICAgICB3",
+"aW5kb3cucGFyZW50LnBvc3RNZXNzYWdlKHsgdHlwZTogJ3ZhbE1vZHVsZUJhY2snIH0sICcqJyk7",
+"CiAgICAgIHJldHVybjsKICAgIH0KICB9IGNhdGNoIChlKSB7fQogIHRyeSB7IGhpc3RvcnkuYmFj",
+"aygpOyB9IGNhdGNoIChlMikge30KfQpsb2FkQ25Ib2xpZGF5cygpOwpsb2FkVXNIb2xpZGF5cygp",
+"Owp1cGRhdGVIZWFkZXIoKTsKZnVuZEZsb3dMb2FkaW5nLnVzID0gdHJ1ZTsKZnVuZEZsb3dMb2Fk",
+"aW5nLmNuID0gdHJ1ZTsKcmVidWlsZE1haW5WaWV3KCk7CnJlbmRlclNoZWV0cygpOwpyZWZyZXNo",
+"TGl2ZUZ1bmRGbG93KHRydWUpOwpzZXRJbnRlcnZhbCh1cGRhdGVIZWFkZXIsIDMwMDAwKTsKc2V0",
+"SW50ZXJ2YWwoZnVuY3Rpb24gKCkgewogIHRyeSB7CiAgICB2YXIgZHMgPSBlZmZlY3RpdmVEUygp",
+"OwogICAgaWYgKGRzICYmIGRzLl9fbGl2ZSAmJiBjdXJyZW50Vmlld0RhdGUgPT09IG51bGwpIHJl",
+"dHVybjsKICAgIGppdHRlckZsb3dSYW5raW5nKCk7CiAgfSBjYXRjaCAoZSkgeyBqaXR0ZXJGbG93",
+"UmFua2luZygpOyB9Cn0sIDE4MDApOwpzZXRJbnRlcnZhbChmdW5jdGlvbiAoKSB7CiAgdHJ5IHsK",
+"ICAgIGlmIChjdXJyZW50Vmlld0RhdGUgPT09IG51bGwpIHJlZnJlc2hMaXZlRnVuZEZsb3coKTsK",
+"ICB9IGNhdGNoIChlKSB7fQp9LCAxMjAwMDApOwp3aW5kb3cuYWRkRXZlbnRMaXN0ZW5lcigncmVz",
+"aXplJywgcmVidWlsZE1haW5WaWV3KTsKPC9zY3JpcHQ+Cgo8L2JvZHk+CjwvaHRtbD4K"
 ];
 
     const VAL_MODULES = [
@@ -16891,17 +17000,18 @@ const FALLBACK_SECTORS = {
     function paintSectorLiveStatus(mode) {
       const el = document.getElementById('sectorLiveStatus');
       if (!el) return;
-      if (mode === 'loading') {
+      // 更新中：统一原版样式「○ 更新中…」，避免 ○/●、有无省略号来回跳
+      var busy = false;
+      try {
+        busy = !!(window.__sectorRefreshBusy && (window.__sectorRefreshBusy.us || window.__sectorRefreshBusy.cn));
+      } catch (eB) {}
+      if (mode === 'loading' || busy) {
         el.textContent = '○ 更新中…';
         el.style.color = 'var(--orange)';
         return;
       }
-      // 板块默认不后台狂刷：显示「已缓存」；真正 fullRefresh 时再改成更新中
-      if (window.__sectorRefreshBusy && (window.__sectorRefreshBusy.us || window.__sectorRefreshBusy.cn)) {
-        el.innerHTML = '<span style="color:var(--orange);">●</span> 更新中';
-      } else {
-        el.innerHTML = '<span style="color:var(--green);">●</span> 已缓存';
-      }
+      // 空闲：原版「● 实时更新」
+      el.textContent = '● 实时更新';
       el.style.color = 'var(--green)';
       window.__sectorLiveAt = Date.now();
     }
@@ -17489,15 +17599,15 @@ function clearSectorRefreshSlowHint() {
       if (mkt === 'cn') {
         // 名称=实际入口，避免全叫东财分不清
         return [
-          { short: '线路1', full: '线路1·东财代理', tip: 'Worker→东财；节点含 push2/79/82 等' },
-          { short: '线路2', full: '线路2·东财直连', tip: '直连东财；失败再试 79/82 等节点' },
+          { short: '线路1', full: '线路1·东财代理', tip: '仅 Worker 代理东财；节点 delay/push2/79/82 等切换' },
+          { short: '线路2', full: '线路2·东财直连', tip: '仅浏览器直连东财；节点 delay/push2/79/82 等切换' },
           { short: '线路3', full: '线路3·新浪财经', tip: '成分东财·行情新浪 hq.sinajs.cn' },
           { short: '线路4', full: '线路4·腾讯财经', tip: '成分东财·行情腾讯 qt.gtimg.cn' }
         ];
       }
       return [
-        { short: '线路1', full: '线路1·东财代理', tip: 'Worker→东财美股列表' },
-        { short: '线路2', full: '线路2·东财直连', tip: '浏览器直连东财美股列表' },
+        { short: '线路1', full: '线路1·东财代理', tip: '仅 Worker 代理东财美股列表；节点可切换' },
+        { short: '线路2', full: '线路2·东财直连', tip: '仅浏览器直连东财美股列表；节点可切换' },
         { short: '线路3', full: '线路3·Finnhub', tip: '板块涨跌/成分走 Finnhub（Worker代理）；不拉东财全表' }
       ];
     }
@@ -18145,26 +18255,17 @@ async function onSectorRefreshClick() {
                 if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
                   viaW = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u);
                 }
-                // 0代理优先 1直连优先 2备用域名 3/4仍先直连东财，失败再代理（名单源仍主要东财）
+                // 线路1=只代理；线路2=只直连；节点间仍可切换，入口方式不混用
                 if (rtCn === 0) {
                   if (viaW) urls.push(viaW);
+                } else if (rtCn === 1) {
                   urls.push(u);
                 } else {
-                  urls.push(u);
+                  // 线路3/4：成分名单仍东财，先代理后直连兜底
                   if (viaW) urls.push(viaW);
+                  urls.push(u);
                 }
               });
-              // 线路3/4：成分名单仍用东财；行情由新浪/腾讯覆盖
-              if (rtCn >= 2) {
-                urls = [];
-                hosts.forEach(function (h) {
-                  var u = h + path;
-                  if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-                    urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
-                  }
-                  urls.push(u);
-                });
-              }
               for (let pi = 0; pi < urls.length; pi++) {
                 try {
                   try { if (typeof setSectorEmNodeHint === 'function') setSectorEmNodeHint(urls[pi], false); } catch (eNh) {}
@@ -19247,14 +19348,12 @@ async function onSectorRefreshClick() {
           return null;
         }
         try {
+          // 线路1只代理；线路2只直连；不在入口方式之间互兜底
           if (preferDirect) {
             data = await withTimeout(tryDirect(url), 12000);
-            if (!data) data = await withTimeout(tryWorker(url), 12000);
-            if (!data && typeof fetchViaProxies === 'function') data = await withTimeout(fetchViaProxies(url), 12000);
           } else {
             if (typeof fetchViaProxies === 'function') data = await withTimeout(fetchViaProxies(url), 12000);
             if (!data) data = await withTimeout(tryWorker(url), 12000);
-            if (!data) data = await withTimeout(tryDirect(url), 12000);
           }
         } catch (e1) { data = null; }
         if (data && data.data && (data.data.diff || data.data.total != null)) return data;
@@ -21784,12 +21883,23 @@ async function openCNSectorStocks(boardCode, sectorName, isRestore) {
                 '&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + boardCode +
                 '&fields=f12,f14,f2,f3&_=' + Date.now();
               var urls = [];
+              var rtCn = 1;
+              try { rtCn = (typeof getSectorRoute === 'function') ? getSectorRoute('cn') : 1; } catch (eRt) {}
               hosts.forEach(function (h) {
                 var u = h + path;
+                var viaW = null;
                 if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
-                  urls.push(WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u));
+                  viaW = WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(u);
                 }
-                urls.push(u);
+                // 线路1只代理；线路2只直连；其它先代理后直连
+                if (rtCn === 0) {
+                  if (viaW) urls.push(viaW);
+                } else if (rtCn === 1) {
+                  urls.push(u);
+                } else {
+                  if (viaW) urls.push(viaW);
+                  urls.push(u);
+                }
               });
               for (let pi = 0; pi < urls.length; pi++) {
                 try {
@@ -25910,6 +26020,23 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
         desc: 'A股/美股财报接口',
         url: 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_FINANCE_MAINFINADATA&columns=SECUCODE&pageNumber=1&pageSize=1&filter=(SECUCODE%3D%22000001.SZ%22)&_=' + Date.now()
       });
+      // 板块资金流（资金流向模块主接口）
+      var bkzjRaw = 'https://data.eastmoney.com/dataapi/bkzj/getbkzj?key=f62&code=m:90+t:2&_=' + Date.now();
+      if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
+        list.push({
+          id: 'em_bkzj',
+          name: '东财板块资金流',
+          desc: '资金流向模块 · dataapi/bkzj',
+          url: WORKER_BASE.replace(/\?.*$/, '') + '?url=' + encodeURIComponent(bkzjRaw)
+        });
+      } else {
+        list.push({
+          id: 'em_bkzj',
+          name: '东财板块资金流',
+          desc: '资金流向模块 · dataapi/bkzj',
+          url: bkzjRaw
+        });
+      }
       var emUsRaw = 'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f12&fs=m:105,m:106,m:107&fields=f12,f14,f2,f3&_=' + Date.now();
       if (typeof WORKER_BASE !== 'undefined' && WORKER_BASE) {
         list.push({
@@ -26081,6 +26208,14 @@ const MACRO_CACHE_PREFIX = 'macro_page_v2_';
       }
       if (id === 'em_dc') {
         if (j && (j.result || j.data || j.success === true || j.code === 0 || j.code === '0')) return { ok: true, tag: '在线' };
+        return { ok: false, tag: '无数据' };
+      }
+      if (id === 'em_bkzj') {
+        if (j && j.data && (j.data.total > 0 || (j.data.diff && (Array.isArray(j.data.diff) ? j.data.diff.length : Object.keys(j.data.diff).length)))) {
+          return { ok: true, tag: '在线' };
+        }
+        if (j && j.rc === 0 && j.data) return { ok: true, tag: '在线' };
+        if (j && j.error) return { ok: false, tag: '失败' };
         return { ok: false, tag: '无数据' };
       }
       if (id === 'finnhub') {
