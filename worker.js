@@ -271,6 +271,9 @@ export default {
       'finnhub.io',
       'www.federalreserve.gov',
       'federalreserve.gov',
+      'vip.stock.finance.sina.com.cn',
+      'finance.sina.com.cn',
+      'money.finance.sina.com.cn',
       'hq.sinajs.cn',
       'sinajs.cn',
       'qt.gtimg.cn',
@@ -292,7 +295,12 @@ export default {
         Accept: 'application/json,text/plain,*/*',
       };
       // 新浪/腾讯行情直连常要 Referer，否则空包
-      if (parsed.hostname === 'hq.sinajs.cn' || parsed.hostname.endsWith('.sinajs.cn')) {
+      if (
+        parsed.hostname === 'hq.sinajs.cn' ||
+        parsed.hostname.endsWith('.sinajs.cn') ||
+        parsed.hostname === 'vip.stock.finance.sina.com.cn' ||
+        parsed.hostname.endsWith('.sina.com.cn')
+      ) {
         hdrs.Referer = 'https://finance.sina.com.cn/';
         hdrs.Accept = '*/*';
       } else if (
@@ -333,6 +341,8 @@ export default {
       const isGbkHost =
         host === 'hq.sinajs.cn' ||
         host.endsWith('.sinajs.cn') ||
+        host === 'vip.stock.finance.sina.com.cn' ||
+        host.endsWith('.sina.com.cn') ||
         host === 'qt.gtimg.cn' ||
         host === 'web.ifzq.gtimg.cn' ||
         host.endsWith('.gtimg.cn');
