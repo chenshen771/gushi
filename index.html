@@ -4434,10 +4434,10 @@ async function fetchQuote(symbol, opts) {
         }
         function fmtHolidayHint(h) {
           if (!h) return '';
+          // 周末本身不展示「周末」文案；由调用方改显示下一个节日
           if (h.kind === 'weekend') return '';
           var label = h.mkt === 'cn' ? 'A股' : '美股';
           var name = fmtHolidayNameShort(h.mkt, h.name || '休市');
-          if (name === '周末') return '';
           // 今天休市：A股休市N天 · 国庆节
           if (h.days === 0) {
             var rest = holidayRestDays(h.mkt, h.ymd);
@@ -4491,11 +4491,16 @@ async function fetchQuote(symbol, opts) {
           if (cn && (cn.kind === 'lunch' || cn.kind === 'pre')) {
             return { mkt: 'cn', pick: cn };
           }
-          // A股今日节日/周末：若美股还在交易日开盘前或盘中逻辑已在上面；若美股也休，走节日
+          // A股今日节日/周末：若美股还在交易日开盘前或盘中逻辑已在上面；若美股也休，走节日/周末
           if (cn && (cn.kind === 'holiday' || cn.kind === 'weekend')) {
             // 美股若仍是交易日 pre（北京夜晚美股未开）→ 提示美股距开盘
             if (us && us.kind === 'pre') return { mkt: 'us', pick: us };
             if (us && us.kind === 'after' && afterCloseWithin1h('us')) return { mkt: 'us', pick: us };
+            // 美股也周末/节日：自选以美股为主时提示美股，否则 A 股
+            if (us && (us.kind === 'holiday' || us.kind === 'weekend')) {
+              var focus = (typeof mktWatchFocus === 'function') ? mktWatchFocus() : 'us';
+              if (focus === 'us') return { mkt: 'us', pick: us, preferHoliday: true };
+            }
             return { mkt: 'cn', pick: cn, preferHoliday: true };
           }
           // A股已收盘
@@ -4552,8 +4557,21 @@ async function fetchQuote(symbol, opts) {
             return ' · ' + label + '休市' + rest0 + '天 · ' + nm0;
           }
           if (pick.kind === 'weekend') {
-            // 周末不展示状态文案
-            return '';
+            // 周末：不显示「周末」，改显示下一个节日（如 美股 · 感恩节 · 12天后）
+            var nearW = nearestHoliday();
+            // nearestHoliday 可能命中「今天」的节日名；周末不是节日，跳过 days===0 的空名
+            if (nearW && nearW.days === 0 && !mktHolidayName(nearW.mkt, nearW.ymd)) {
+              nearW = null;
+            }
+            if (nearW && nearW.days === 0) {
+              // 今天其实是节日（国庆落在周末）：按节日显示
+              var nmW = fmtHolidayNameShort(nearW.mkt, nearW.name);
+              var restW = holidayRestDays(nearW.mkt, nearW.ymd);
+              return ' · ' + (nearW.mkt === 'cn' ? 'A股' : '美股') + '休市' + restW + '天 · ' + nmW;
+            }
+            if (nearW && nearW.days > 0) return fmtHolidayHint(nearW);
+            // 没有联网节日数据时兜底
+            return ' · ' + label + '休市';
           }
           // 兜底：当前市场「今天」已是节日（含美股），直接显示，不要 X 天后
           try {
